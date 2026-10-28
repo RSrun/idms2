@@ -1,0 +1,14 @@
+/* IDMS içerik betiği — yalnızca sayfa içi bildirim kabı.
+   Gölge DOM (shadow root) kullanıldığı için sayfa stilleri karışmaz. */
+.idms-toast-host {
+  position: fixed !important;
+  right: 16px !important;
+  bottom: 16px !important;
+  z-index: 2147483647 !important;
+  pointer-events: none !important;
+  display: block !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: none !important;
+}

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IDMS</title>
+  </head>
+  <body>
+    <div id="float" hidden>
+      <button type="button" id="pill" title="IDMS">
+        <span class="mark">IDMS</span>
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+          <path d="M12 4v11" />
+          <path d="m7 10 5 5 5-5" />
+          <path d="M5 20h14" />
+        </svg>
+      </button>
+
+      <div id="card" hidden>
+        <div class="head">
+          <span class="logo">IDMS</span>
+          <div class="titles">
+            <div class="title" id="title">Video</div>
+            <div class="meta" id="meta"></div>
+          </div>
+          <button type="button" class="icon" id="close" title="Kapat" aria-label="Kapat">✕</button>
+        </div>
+
+        <div class="list" id="list"></div>
+
+        <div class="foot">
+          <button type="button" class="link" id="formats">Formatlar…</button>
+          <span class="grow"></span>
+          <button type="button" class="link" id="open">IDMS'i aç</button>
+        </div>
+
+        <div class="status" id="status" hidden></div>
+      </div>
+    </div>
+    <script type="module" src="/src/float.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IDMS</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="top">
+      <img src="icons/icon48.png" alt="" width="28" height="28" />
+      <div class="title">
+        <strong>IDMS</strong>
+        <span id="status" class="status"><i class="dot"></i><span id="status-text">Kontrol ediliyor…</span></span>
+      </div>
+      <span id="count" class="badge" title="IDMS'e gönderilen indirme" hidden>0</span>
+    </header>
+
+    <section id="pair-panel" class="card" hidden>
+      <p class="lead">
+        IDMS'te <b>Ayarlar → Tarayıcı</b> bölümündeki 6 haneli eşleştirme kodunu girin.
+      </p>
+      <div class="pair-row">
+        <input
+          id="pair-code"
+          maxlength="6"
+          placeholder="ABC123"
+          autocomplete="one-time-code"
+          autocapitalize="characters"
+          spellcheck="false"
+        />
+        <button id="pair-btn" class="btn primary">Eşleştir</button>
+      </div>
+      <p id="pair-offline" class="msg err" hidden>
+        IDMS uygulaması kapalı. Uygulamayı başlatın; kod alanı etkinleşir.
+      </p>
+      <p id="pair-msg" class="msg" hidden></p>
+    </section>
+
+    <section id="main-panel" hidden>
+      <div class="card">
+        <div class="meta">
+          <span>Yerel köprü</span>
+          <span id="srv-addr" class="mono">—</span>
+        </div>
+
+        <label class="row">
+          <span class="lbl">Tarayıcı indirmelerini devral</span>
+          <input type="checkbox" id="opt-takeover" class="switch" />
+        </label>
+        <label class="row">
+          <span class="lbl">İndirilebilir içerikleri algıla</span>
+          <input type="checkbox" id="opt-detect" class="switch" />
+        </label>
+        <label class="row">
+          <span class="lbl">Eklenti etkin</span>
+          <input type="checkbox" id="opt-enabled" class="switch" />
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="dl-page" class="btn primary">Bu sayfayı indir</button>
+        <button id="open-app" class="btn">IDMS'i aç</button>
+      </div>
+      <button id="unpair" class="btn ghost danger">Eşleşmeyi kaldır</button>
+    </section>
+
+    <section id="detected-sec">
+      <div class="sec-head">
+        <h3>Bu sayfada algılananlar</h3>
+        <button id="clear-detected" class="link">Temizle</button>
+      </div>
+      <ul id="detected-list" class="detected"></ul>
+      <p id="detected-empty" class="empty">Henüz indirilebilir içerik algılanmadı.</p>
+    </section>
+
+    <footer class="foot">
+      <span id="hint" class="msg"></span>
+      <button id="refresh" class="link">Yenile</button>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

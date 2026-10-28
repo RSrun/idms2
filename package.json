@@ -1,0 +1,83 @@
+{
+  "name": "idms",
+  "productName": "IDMS",
+  "version": "1.0.0",
+  "description": "IDM benzeri indirme yöneticisi: torrent, tarayıcı eklentisi, sosyal medya indirme ve bildirimler",
+  "main": "out/main/index.js",
+  "type": "module",
+  "author": "idms",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "start": "electron-vite preview",
+    "icons": "node scripts/make-icons.mjs",
+    "ext": "node scripts/build-extension.mjs",
+    "build:firefox": "npm run ext && Compress-Archive -Path extension/gecko/* -DestinationPath dist/idms-firefox.zip -Force",
+    "prepare:ext": "node scripts/build-extension.mjs",
+    "dist": "npm run icons && npm run ext && electron-builder --win",
+    "screenshot": "electron-vite dev -- --screenshot",
+    "test:ext": "playwright test"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "webtorrent": "^2.5.1",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/ws": "^8.18.0",
+    "@vitejs/plugin-react": "^4.5.0",
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^4.0.1",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  },
+  "build": {
+    "appId": "com.idms.app",
+    "productName": "IDMS",
+    "npmRebuild": false,
+    "files": [
+      "out/**/*",
+      "resources/**/*",
+      "extension/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "extraResources": [
+      "extension/**/*"
+    ],
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "allowScripts": {
+    "electron@37.10.3": true,
+    "esbuild@0.25.12": true,
+    "utp-native@2.5.3": true,
+    "node-datachannel@0.32.3": true,
+    "bufferutil@4.1.0": true,
+    "utf-8-validate@6.0.6": true,
+    "electron-winstaller@5.4.0": true
+  }
+}
+
+
+
+
