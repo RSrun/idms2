@@ -50,6 +50,7 @@
       "extension/**/*"
     ],
     "win": {
+      "icon": "resources/icon.png",
       "target": [
         {
           "target": "nsis",
@@ -60,7 +61,11 @@
       ]
     },
     "extraResources": [
-      "extension/**/*"
+      "extension/**/*",
+      {
+        "from": "resources/icon.png",
+        "to": "icon.png"
+      }
     ],
     "nsis": {
       "oneClick": false,

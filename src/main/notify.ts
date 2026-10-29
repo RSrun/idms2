@@ -1,5 +1,7 @@
 import { Notification, shell, BrowserWindow } from 'electron'
 import { EventEmitter } from 'events'
+import { existsSync } from 'fs'
+import { dirname } from 'path'
 import type { AppToast, DownloadItem, NotificationSettings } from '@shared/types'
 import type { Store } from './store'
 import { formatBytes, formatEta, formatSpeed, t } from './lang'
@@ -172,15 +174,31 @@ export class Notifier extends EventEmitter {
       ]
     })
     n.on('action', (_e, index) => {
-      if (index === 0) void shell.openPath(item.savePath)
-      else void shell.showItemInFolder(item.savePath)
+      this.reveal(item, index === 0)
       this.focusApp()
     })
     n.on('click', () => {
-      void shell.showItemInFolder(item.savePath)
+      this.reveal(item, false)
       this.focusApp()
     })
     n.show()
+  }
+
+  /**
+   * Tamamlanan dosyayı açar/gösterir. Birleştirme sonrası parça dosyaları
+   * silindiği için yol geçersiz olabilir; o durumda klasörü açarız
+   * (aksi halde Windows "dosya bulunamadı" penceresi çıkar).
+   */
+  private reveal(item: DownloadItem, openFile: boolean): void {
+    if (item.savePath && existsSync(item.savePath)) {
+      if (openFile) void shell.openPath(item.savePath)
+      else void shell.showItemInFolder(item.savePath)
+      return
+    }
+    const dir = item.savePath
+      ? dirname(item.savePath)
+      : this.store.getSettings().general.downloadDir
+    void shell.openPath(dir)
   }
 
   /** 3. AŞAMA (alternatif) — hata */

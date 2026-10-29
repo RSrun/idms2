@@ -82,6 +82,10 @@ export interface DownloadItem {
   pageUrl?: string
   savePath: string
   category: CategoryId
+  /** Kullanıcının indirme penceresinde girdiği açıklama */
+  description?: string
+  /** Sunucu Range (devam/çoklu bağlantı) destekliyor mu */
+  supportsRange?: boolean
   state: DownloadState
   progress: DownloadProgress
   createdAt: number
@@ -129,6 +133,19 @@ export interface GeneralSettings {
   monitorClipboard: boolean
   startOnBoot: boolean
   startMinimized: boolean
+  /**
+   * Kategori başına hatırlanan kayıt klasörü (IDM'nin "bu kategori için
+   * bu yolu hatırla" seçeneği). Anahtar CategoryId ya da özel kategori adı.
+   */
+  categoryDirs?: Record<string, string>
+  /** "Kategori +" ile eklenen özel klasörler */
+  customCategories?: Array<{ name: string; dir: string }>
+  /**
+   * Aynı URL tekrar eklendiğinde ne yapılsın:
+   * ask = pencereyi göster, number = numaralı kopya, overwrite = üzerine yaz,
+   * continue = mevcut indirmeye devam et (tamamlandıysa bitiş penceresi).
+   */
+  duplicatePolicy?: 'ask' | 'number' | 'overwrite' | 'continue'
 }
 
 export interface NotificationSettings {
@@ -146,6 +163,10 @@ export interface NotificationSettings {
   inAppToasts: boolean
   /** Tamamlanınca ses çal */
   playSound: boolean
+  /** İndirme sırasında IDM tarzı ilerleme penceresi */
+  progressWindow?: boolean
+  /** İndirme bitince "İndirme tamamlandı" penceresi */
+  completeWindow?: boolean
 }
 
 export interface SocialSettings {
@@ -183,7 +204,7 @@ export interface ExtensionSettings {
   /** Token almaya yetkili eklenti kökenleri */
   allowedOrigins: string[]
   enabled: boolean
-  /** Video/ses üzerinde yüzen IDMS paneli (IDM'nin yüzen paneli gibi) */
+  /** Sayfada çizilen yüzen IDMS paneli (yalnızca tarayıcı sekmesinde yaşar) */
   floatingPanel: boolean
 }
 
@@ -211,14 +232,16 @@ export interface FloatMediaInfo {
   needsExtractor?: boolean
   /** Oynatıcının <source> listesi (kalite seçenekleri) */
   sources?: FloatMediaSource[]
-}
-
-/** Ekran (DIP) koordinatlarında medya dikdörtgeni */
-export interface FloatScreenRect {
-  x: number
-  y: number
-  width: number
-  height: number
+  /**
+   * Oynatıcının ağdan aldığı HLS/DASH manifesti (m3u8/mpd). Reddit gibi
+   * sitelerde oynatıcı tek bir <source> gösterir; kaliteler manifesttedir.
+   */
+  manifest?: string
+  /**
+   * Eklentinin sayfa için topladığı oturum çerezleri. Reddit/Instagram gibi
+   * giriş isteyen sitelerde yt-dlp'ye `--cookies` olarak verilir.
+   */
+  cookies?: CookieRecord[]
 }
 
 /** Yüzen panelde listelenen indirme seçeneği (video kalitesi / ses dosyası) */
@@ -233,36 +256,23 @@ export interface FloatFormat {
   /** "MP4 · 1920×1080 · 60 fps" */
   detail?: string
   sizeBytes?: number | null
-  /** Doğrudan HTTP adresi (yt-dlp kullanmadan indirilir) */
+  /** Satırın indirileceği HTTP adresi; akış (m3u8/mpd) ise yt-dlp çözer */
   url?: string
   /** Listenin en iyi seçeneği */
   best?: boolean
 }
 
-export type FloatFormatsState = 'idle' | 'loading' | 'ready' | 'empty' | 'error'
-
-/** Yüzen panelin kendi durumu (panel sayfası bunu okur) */
-export interface FloatPanelState {
-  media: FloatMediaInfo | null
-  expanded: boolean
-  language: 'tr' | 'en'
-  /** Video kaliteleri ve ses dosyaları */
+/**
+ * Yüzen panelin kalite listesi yanıtı. Panel artık tarayıcı sayfasının içinde
+ * çizilir; uygulama yalnızca listeyi ve dilini üretir.
+ */
+export interface FloatFormatsReply {
+  ok: boolean
   formats: FloatFormat[]
-  formatsState: FloatFormatsState
-  /** Kalite listesi alınamadıysa kısa açıklama */
-  formatsNote?: string
+  /** Liste boşsa/hata varsa panelde gösterilecek kısa not */
+  note?: string
+  language: 'tr' | 'en'
 }
-
-/** Yüzen panelden gelen eylemler */
-export type FloatAction =
-  | { type: 'download-video' }
-  | { type: 'download-audio' }
-  /** Listeden seçilen kalite / ses dosyası */
-  | { type: 'download-format'; formatId: string }
-  | { type: 'formats' }
-  | { type: 'open-app' }
-  | { type: 'close' }
-  | { type: 'expand' | 'collapse' }
 
 export interface Settings {
   general: GeneralSettings
@@ -338,9 +348,77 @@ export interface AddDownloadRequest {
   name?: string
   savePath?: string
   category?: CategoryId
+  description?: string
   /** Onay penceresi açmadan doğrudan başlat */
   silent?: boolean
+  /** false ise kayıt kuyruğa eklenir ama hemen başlatılmaz */
+  start?: boolean
   headers?: Record<string, string>
+}
+
+/* ------------------------------------------------------------------------ */
+/* IDM tarzı indirme pencereleri (öncesi / sırasında / sonrası / aynı URL)   */
+/* ------------------------------------------------------------------------ */
+
+export type DownloadWindowMode = 'add' | 'progress' | 'complete' | 'duplicate'
+
+/** Pencerenin istediği ekleme bilgisi (henüz indirme kaydı oluşmamış olabilir) */
+export interface DownloadWindowRequest {
+  url: string
+  pageUrl?: string
+  name?: string
+  savePath?: string
+  category?: CategoryId
+  description?: string
+  silent?: boolean
+  /** false ise pencere onayından sonra indirme kuyruğa eklenir */
+  start?: boolean
+}
+
+/** İlerleme penceresindeki bağlantı (segment) satırı */
+export interface DownloadWindowSegment {
+  index: number
+  start: number
+  end: number
+  received: number
+  /** Segmentin bayt cinsinden toplam boyutu */
+  size: number
+  done: boolean
+}
+
+export interface DownloadWindowState {
+  mode: DownloadWindowMode
+  settings: Settings
+  /** İlerleme ve tamamlandı pencereleri için kayıt */
+  item?: DownloadItem
+  /** Ekleme penceresi için istek */
+  request?: DownloadWindowRequest
+  /** Aynı bağlantı penceresinde mevcut kayıt */
+  existing?: DownloadItem
+  /** İlerleme penceresi için canlı segmentler */
+  segments?: DownloadWindowSegment[]
+}
+
+export type DownloadWindowAction =
+  | { type: 'add-start'; request: DownloadWindowRequest; remember: boolean }
+  | { type: 'add-later'; request: DownloadWindowRequest; remember: boolean }
+  | { type: 'add-cancel' }
+  | { type: 'progress-pause' }
+  | { type: 'progress-resume' }
+  | { type: 'progress-cancel' }
+  | { type: 'complete-open'; dontShowAgain?: boolean }
+  | { type: 'complete-open-with'; dontShowAgain?: boolean }
+  | { type: 'complete-folder'; dontShowAgain?: boolean }
+  | { type: 'complete-close'; dontShowAgain?: boolean }
+  | { type: 'duplicate-choose'; choice: 'number' | 'overwrite' | 'continue'; remember: boolean }
+  | { type: 'duplicate-cancel' }
+  | { type: 'set-speed-limit'; mbps: number }
+  | { type: 'set-complete-window'; value: boolean }
+
+export interface DownloadWindowApi {
+  state(): Promise<DownloadWindowState>
+  action(action: DownloadWindowAction): Promise<unknown>
+  onUpdate(cb: (state: DownloadWindowState) => void): () => void
 }
 
 export interface UrlProbeResult {
@@ -380,6 +458,15 @@ export interface MediaFormat {
   note: string
   /** audio-only ise true */
   isAudioOnly: boolean
+  /** yt-dlp akış protokolü: "https", "m3u8_native"… (boş = bilinmiyor) */
+  protocol?: string
+  /**
+   * HLS (m3u8) akışı. yt-dlp'nin yerel HLS indiricisi parçaları MPEG-TS
+   * olarak .mp4'e yazıyor ve ayrı ses akışıyla birleştirme "Conversion
+   * failed!" ile bitiyor; bu yüzden aynı çözünürlükte DASH (https)
+   * biçimi varsa o tercih edilir.
+   */
+  hls?: boolean
 }
 
 export interface MediaDownloadRequest {
@@ -435,6 +522,36 @@ export interface ExtensionServerStatus {
   paired: boolean
 }
 
+/**
+ * Kurulu Firefox / Zen profili ve eklenti durumu.
+ * Gecko tarayıcılar imzasız eklentiyi kendiliğinden yüklemez; uygulama profili
+ * `xpinstall.signatures.required=false` ile hazırlar (bkz. extGecko.ts).
+ */
+export interface GeckoProfile {
+  browser: 'zen' | 'firefox'
+  browserName: string
+  /** Tarayıcı çalıştırılabilir dosyası (bulunamazsa boş) */
+  exe: string
+  profileDir: string
+  profileName: string
+  /** Tarayıcının varsayılan (açılışta kullandığı) profili mi */
+  isDefault: boolean
+  /** Eklenti profile kalıcı olarak kurulu mu */
+  installed: boolean
+  /** about:debugging ile bırakılmış paketsiz klasör var mı */
+  unpacked: boolean
+  signaturesDisabled: boolean
+  running: boolean
+}
+
+/** Eklenti kurulum/kaldırma sonucu */
+export interface GeckoInstallResult {
+  ok: boolean
+  error?: string
+  /** Tarayıcı açıktı; eklenti yeniden başlatmada yüklenir */
+  running?: boolean
+}
+
 /** Eklenti <-> uygulama WS mesajları */
 export type ExtToAppMessage =
   | { t: 'hello'; client: string; version: string; pairingCode?: string }
@@ -453,14 +570,36 @@ export type ExtToAppMessage =
   | { t: 'download'; url: string; pageUrl?: string; name?: string; referrer?: string; mimeType?: string; cookies?: CookieRecord[] }
   | { t: 'download-media'; url: string; pageUrl?: string; quality?: 'best' | 'audio'; cookies?: CookieRecord[] }
   | {
-      t: 'float'
-      state: 'show' | 'update' | 'hide'
-      /** panelin hangi medyaya ait olduğunu ayırt eder (URL) */
+      /**
+       * Sayfa içi yüzen panelin kalite listesi isteği. Panel tarayıcıda
+       * çizildiği için konum/odak bilgisi gerekmez; uygulama yalnızca
+       * listeyi hazırlar.
+       */
+      t: 'float-formats'
+      /** Aynı medyayı eşlemek için panelin ürettiği anahtar */
+      key?: string
+      media: FloatMediaInfo
+      reqId?: string
+    }
+  | {
+      t: 'float-download'
+      key?: string
+      /** Listeden seçilen satırın türü */
+      kind: 'video' | 'audio'
+      /** Panelde listelenen satırın kimliği; yoksa en iyi seçenek indirilir */
+      formatId?: string
+      media: FloatMediaInfo
+      reqId?: string
+    }
+  | {
+      t: 'float-action'
+      action: 'formats' | 'open-app'
       key?: string
       media?: FloatMediaInfo
-      rect?: FloatScreenRect
+      reqId?: string
     }
   | { t: 'probe'; url: string }
+  | { t: 'unpair' }
   | { t: 'open-app' }
   | { t: 'ping' }
 
@@ -470,3 +609,7 @@ export type AppToExtMessage =
   | { t: 'ack'; ref?: string; ok: boolean; message?: string; id?: string }
   | { t: 'status'; active: number; totalSpeed: number; items: Array<{ id: string; name: string; percent: number; state: DownloadState }> }
   | { t: 'toast'; title: string; message: string; stage: 'start' | 'progress' | 'complete' | 'error' }
+  | ({ t: 'float-formats'; reqId?: string } & FloatFormatsReply)
+  | { t: 'float-download'; reqId?: string; ok: boolean; message?: string }
+  /** Tarayıcı paneli ayarı değişti (panel sayfada çizilir) */
+  | { t: 'config'; floatingPanel: boolean; enabled?: boolean }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ExtensionServerStatus, Settings } from '@shared/types'
+import type { ExtensionServerStatus, GeckoProfile, Settings } from '@shared/types'
 import { useT } from '../i18n'
 import { SUPPORTED_SITES } from '../ytdlpInfo'
 
@@ -230,6 +230,26 @@ function GeneralTab({ s, patch }: { s: Settings; patch: (p: any) => void }) {
         value={s.general.confirmBeforeDownload}
         onChange={(v) => patch({ general: { confirmBeforeDownload: v } })}
       />
+
+      <div className="setting-row">
+        <div className="txt">
+          <div className="lbl">{t('set.duplicatePolicy')}</div>
+          <div className="hint">{t('set.duplicatePolicyHint')}</div>
+        </div>
+        <div className="ctrl">
+          <select
+            className="select"
+            style={{ width: 190 }}
+            value={s.general.duplicatePolicy || 'ask'}
+            onChange={(e) => patch({ general: { duplicatePolicy: e.target.value } })}
+          >
+            <option value="ask">{t('set.duplicatePolicy.ask')}</option>
+            <option value="number">{t('set.duplicatePolicy.number')}</option>
+            <option value="overwrite">{t('set.duplicatePolicy.overwrite')}</option>
+            <option value="continue">{t('set.duplicatePolicy.continue')}</option>
+          </select>
+        </div>
+      </div>
       <SwitchRow
         label={t('set.monitorClipboard')}
         value={s.general.monitorClipboard}
@@ -260,6 +280,17 @@ function NotifyTab({ s, patch }: { s: Settings; patch: (p: any) => void }) {
       </div>
 
       <div className="section-title">{t('settings.tab.notifications')}</div>
+
+      <SwitchRow
+        label={t('set.notify.progressWindow')}
+        value={s.notifications.progressWindow !== false}
+        onChange={(v) => patch({ notifications: { progressWindow: v } })}
+      />
+      <SwitchRow
+        label={t('set.notify.completeWindow')}
+        value={s.notifications.completeWindow !== false}
+        onChange={(v) => patch({ notifications: { completeWindow: v } })}
+      />
 
       <SwitchRow
         label={t('set.notify.onStart')}
@@ -558,8 +589,46 @@ function ExtensionTab({
   const t = useT()
   const [copied, setCopied] = useState(false)
   const [code, setCode] = useState(s.extension.pairingCode)
+  const [gecko, setGecko] = useState<GeckoProfile[] | null>(null)
+  const [geckoBusy, setGeckoBusy] = useState<string | null>(null)
+  const [geckoNote, setGeckoNote] = useState<string | null>(null)
 
   useEffect(() => setCode(s.extension.pairingCode), [s.extension.pairingCode])
+
+  const loadGecko = async () => {
+    try {
+      setGecko(await api().gecko.list())
+    } catch {
+      setGecko([])
+    }
+  }
+
+  useEffect(() => {
+    void loadGecko()
+  }, [])
+
+  const runGecko = async (p: GeckoProfile, action: 'install' | 'uninstall') => {
+    setGeckoBusy(p.profileDir)
+    setGeckoNote(null)
+    try {
+      const res =
+        action === 'install'
+          ? await api().gecko.install(p.profileDir)
+          : await api().gecko.uninstall(p.profileDir)
+      if (!res.ok) {
+        setGeckoNote(`${t('set.ext.geckoError')}: ${res.error ?? ''}`)
+      } else if (action === 'uninstall') {
+        setGeckoNote(t('set.ext.geckoRemoved'))
+      } else {
+        setGeckoNote(t(res.running ? 'set.ext.geckoInstalledRunning' : 'set.ext.geckoInstalled'))
+      }
+      await loadGecko()
+    } catch (err) {
+      setGeckoNote(`${t('set.ext.geckoError')}: ${(err as Error).message}`)
+    } finally {
+      setGeckoBusy(null)
+    }
+  }
 
   const running = status?.running ?? false
   const clients = status?.clients ?? []
@@ -657,10 +726,6 @@ function ExtensionTab({
             <b>Chrome / Edge / Brave:</b> <code>chrome://extensions</code> → Geliştirici modu →
             Paketlenmemiş yükle → <code>extension/chromium</code>
           </li>
-          <li>
-            <b>Firefox:</b> <code>about:debugging</code> → Bu Firefox → Geçici eklenti yükle →{' '}
-            <code>extension/gecko/manifest.json</code>
-          </li>
         </ul>
         <p>{t('set.ext.installHint')}</p>
         <button
@@ -673,6 +738,67 @@ function ExtensionTab({
         >
           📂 {t('set.ext.openDir')}
         </button>
+      </div>
+
+      <div className="section-title">{t('set.ext.geckoTitle')}</div>
+      <div className="card">
+        <h4>🦊 {t('set.ext.geckoCardTitle')}</h4>
+        {gecko === null ? (
+          <p>{t('common.loading')}</p>
+        ) : gecko.length === 0 ? (
+          <p>{t('set.ext.geckoNone')}</p>
+        ) : (
+          <div className="client-list">
+            {gecko.map((p) => (
+              <div className="client-item" key={p.profileDir} title={p.profileDir}>
+                <span>{p.browser === 'zen' ? '🌀' : '🦊'}</span>
+                <span>
+                  <b>{p.browserName}</b>{' '}
+                  <span className="muted">
+                    {p.profileName}
+                    {p.isDefault ? ` · ${t('common.default')}` : ''}
+                  </span>
+                </span>
+                {p.installed ? (
+                  <span className="pill completed">
+                    <span className="dot" />
+                    {t('set.ext.geckoInstalledBadge')}
+                  </span>
+                ) : null}
+                <span className="grow" />
+                {p.installed ? (
+                  <>
+                    <button
+                      className="btn"
+                      disabled={geckoBusy === p.profileDir}
+                      onClick={() => void runGecko(p, 'install')}
+                    >
+                      {t('set.ext.geckoReinstall')}
+                    </button>
+                    <button
+                      className="btn"
+                      disabled={geckoBusy === p.profileDir}
+                      onClick={() => void runGecko(p, 'uninstall')}
+                    >
+                      {t('common.remove')}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="btn primary"
+                    disabled={geckoBusy === p.profileDir}
+                    onClick={() => void runGecko(p, 'install')}
+                  >
+                    {t('set.ext.geckoInstall')}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <p>{t('set.ext.geckoHint')}</p>
+        {geckoNote ? <p style={{ color: 'var(--text-2)' }}>{geckoNote}</p> : null}
+        <p style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{t('set.ext.geckoSignHint')}</p>
       </div>
     </>
   )

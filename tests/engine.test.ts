@@ -16,10 +16,12 @@
  */
 import { createServer, request } from 'http'
 import { createHash, randomBytes } from 'crypto'
-import { readFileSync, existsSync, rmSync, mkdirSync, writeFileSync } from 'fs'
+import { spawnSync } from 'child_process'
+import { readFileSync, existsSync, rmSync, mkdirSync, writeFileSync, unlinkSync } from 'fs'
 import { dirname, join } from 'path'
 import { tmpdir } from 'os'
 import { fileURLToPath, pathToFileURL } from 'url'
+import { pickExistingOutput } from '../src/main/ytdlp'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 /** Proje kökü: package.json'ı bulana kadar yukarı çık (bundle konumundan bağımsız) */
@@ -109,6 +111,15 @@ const FILES = {
   '/big.bin': randomBytes(6 * 1024 * 1024), // 6 MB → 8 segment
   '/medium.bin': randomBytes(1536 * 1024), // 1.5 MB
   '/video.mp4': randomBytes(3 * 1024 * 1024), // video uzantısı → kategori testi
+  '/master.m3u8': Buffer.from(
+    [
+      '#EXTM3U',
+      '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,CODECS="avc1.4d401e,mp4a.40.2"',
+      'low.m3u8',
+      '#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS="avc1.4d401f,mp4a.40.2"',
+      'high.m3u8'
+    ].join('\n')
+  ),
   '/small.txt': Buffer.from('hello idms2')
 }
 
@@ -533,7 +544,39 @@ async function main() {
   const extStore = new FakeStore(makeSettings())
   extStore.getSettings().general.downloadDir = join(outDir, 'dl10')
   const mgrExt = new DownloadManager(extStore)
-  const ext = new ExtensionServer(extStore, mgrExt)
+
+  /** Sayfa içi panelin uygulama tarafını taklit eder (pencere yok). */
+  const floatCalls: any[] = []
+  const floatBridge = {
+    enabled: true,
+    language: 'tr' as const,
+    async formats(media: any, key?: string) {
+      floatCalls.push({ type: 'formats', media, key })
+      return {
+        ok: true,
+        formats: [
+          {
+            formatId: 'src:0',
+            kind: 'video' as const,
+            label: '720p',
+            url: 'https://cdn.example.com/v-720.mp4'
+          }
+        ],
+        language: 'tr' as const
+      }
+    },
+    async download(media: any, kind: 'video' | 'audio', formatId?: string, key?: string) {
+      floatCalls.push({ type: 'download', media, kind, formatId, key })
+      return { ok: true, message: 'IDMS kuyruğuna eklendi' }
+    },
+    openFormats(media: any) {
+      floatCalls.push({ type: 'openFormats', media })
+    },
+    showMainWindow() {
+      floatCalls.push({ type: 'showMainWindow' })
+    }
+  }
+  const ext = new ExtensionServer(extStore, mgrExt, undefined, floatBridge)
   const started = await ext.start()
   ok('sunucu başladı', started === true)
   ok('status.running', ext.status.running === true)
@@ -724,115 +767,126 @@ async function main() {
   ok('sunucu tarafında paired sayıldı', ext.status.paired === true)
   ok('istemci listelendi', ext.status.clients.length === 1 && ext.status.clients[0].client === 'Chrome')
 
-  // --- Yüzen panel: eşleşme + eklenti kökeni gerekir ---
-  const floatEvents: any[] = []
-  ext.on('float-media', (p: any) => floatEvents.push(p))
-
+  // --- Sayfa içi yüzen panel köprüsü: eşleşme + eklenti kökeni gerekir ---
   const wsFloat = new WebSocket(`ws://127.0.0.1:${ext.status.port}`, {
     origin: 'chrome-extension://abcdefghijklmnop'
   })
-  await new Promise((res, rej) => {
+  await new Promise<void>((res, rej) => {
     wsFloat.on('open', () =>
       wsFloat.send(
-        JSON.stringify({ t: 'hello', client: 'FloatBrowser', version: '1.0.0', pairingCode: 'TEST01' })
+        JSON.stringify({ t: 'hello', client: 'FloatBrowser', version: '1.2.0', pairingCode: 'TEST01' })
       )
     )
     wsFloat.on('message', (d) => {
       const m = JSON.parse(d.toString())
-      if (m.t === 'welcome' && m.paired === true) {
-        wsFloat.send(
-          JSON.stringify({
-            t: 'float',
-            state: 'show',
-            key: 'https://example.com/watch|VIDEO',
-            media: {
-              url: 'https://cdn.example.com/v.mp4',
-              pageUrl: 'https://example.com/watch',
-              title: 'Örnek video',
-              kind: 'video',
-              duration: 65,
-              direct: true,
-              sources: [
-                { url: 'https://cdn.example.com/v-720.mp4', mime: 'video/mp4', label: '720p' },
-                { url: 'javascript:alert(1)', label: 'kötü' }
-              ]
-            },
-            rect: { x: 100, y: 80, width: 640, height: 360 }
-          })
-        )
-      }
+      if (m.t === 'welcome' && m.paired === true) res()
     })
     wsFloat.on('error', rej)
-    setTimeout(res, 800)
+    setTimeout(res, 2000)
   })
-  await sleep(250)
-  const floatMsg = floatEvents[0]
-  ok('float olayı iletildi', !!floatMsg && floatMsg.state === 'show', JSON.stringify(floatMsg))
-  ok('float medya alanları', !!floatMsg && floatMsg.media.url.endsWith('/v.mp4') && floatMsg.media.kind === 'video')
-  ok('float konumu', !!floatMsg && floatMsg.rect.x === 100 && floatMsg.rect.width === 640)
-  ok('float anahtarı', !!floatMsg && floatMsg.key === 'https://example.com/watch|VIDEO')
-  ok(
-    'float <source> kaliteleri iletildi (güvenli olmayan adres atıldı)',
-    !!floatMsg &&
-      Array.isArray(floatMsg.media.sources) &&
-      floatMsg.media.sources.length === 1 &&
-      floatMsg.media.sources[0].label === '720p',
-    JSON.stringify(floatMsg?.media?.sources)
-  )
 
-  const floatHide = await new Promise<any>((res) => {
-    const h = (p: any) => {
-      if (p?.state === 'hide') {
-        ext.off('float-media', h)
-        res(p)
+  const floatMedia = {
+    url: 'https://cdn.example.com/v.mp4',
+    pageUrl: 'https://example.com/watch',
+    title: 'Örnek video',
+    pageTitle: 'Örnek sayfa',
+    kind: 'video',
+    duration: 65,
+    direct: true,
+    sources: [
+      { url: 'https://cdn.example.com/v-720.mp4', mime: 'video/mp4', label: '720p' },
+      { url: 'javascript:alert(1)', label: 'kötü' }
+    ],
+    manifest: 'https://cdn.example.com/master.m3u8'
+  }
+
+  /** WS'ten bir istek gönderip eşleşen yanıtı bekler (panel HTTP /rpc ile aynı sözleşme). */
+  const floatAsk = (msg: any, match: (m: any) => boolean, timeout = 3000) =>
+    new Promise<any>((res) => {
+      const h = (d: any) => {
+        const m = JSON.parse(d.toString())
+        if (match(m)) {
+          wsFloat.off('message', h)
+          res(m)
+        }
       }
-    }
-    ext.on('float-media', h)
-    wsFloat.close()
-    setTimeout(() => res(null), 2000)
-  })
-  ok('float istemcisi kopunca panel kapanır', !!floatHide && floatHide.key === '')
+      wsFloat.on('message', h)
+      wsFloat.send(JSON.stringify(msg))
+      setTimeout(() => {
+        wsFloat.off('message', h)
+        res(null)
+      }, timeout)
+    })
+
+  const fmt = await floatAsk(
+    { t: 'float-formats', key: 'https://example.com/watch|VIDEO', reqId: 'r1', media: floatMedia },
+    (m) => m.t === 'float-formats'
+  )
+  ok('panel kalite isteği yanıtlandı', !!fmt && fmt.ok === true && fmt.reqId === 'r1', JSON.stringify(fmt))
+  ok('panel kaliteleri döndü', !!fmt && fmt.formats.length === 1 && fmt.formats[0].label === '720p')
+  ok('panel dili döndü', !!fmt && fmt.language === 'tr', String(fmt?.language))
+
+  const sentFormats = floatCalls.find((c) => c.type === 'formats')
+  ok('panel medyası uygulamaya iletildi', !!sentFormats && sentFormats.media.url.endsWith('/v.mp4'))
+  ok(
+    'güvenli olmayan <source> atıldı',
+    !!sentFormats &&
+      sentFormats.media.sources.length === 1 &&
+      sentFormats.media.sources[0].label === '720p',
+    JSON.stringify(sentFormats?.media?.sources)
+  )
+  ok(
+    'oynatıcının manifesti korundu',
+    sentFormats?.media?.manifest === 'https://cdn.example.com/master.m3u8',
+    String(sentFormats?.media?.manifest)
+  )
+  ok('panel anahtarı iletildi', sentFormats?.key === 'https://example.com/watch|VIDEO')
+
+  const dlFmt = await floatAsk(
+    {
+      t: 'float-download',
+      key: 'https://example.com/watch|VIDEO',
+      reqId: 'd1',
+      kind: 'video',
+      formatId: 'src:0',
+      media: floatMedia
+    },
+    (m) => m.t === 'float-download'
+  )
+  ok('panel indirme isteği yanıtlandı', !!dlFmt && dlFmt.ok === true && dlFmt.reqId === 'd1', JSON.stringify(dlFmt))
+  const sentDl = floatCalls.find((c) => c.type === 'download')
+  ok('indirilen satır iletildi', sentDl?.kind === 'video' && sentDl?.formatId === 'src:0')
+
+  const act = await floatAsk(
+    { t: 'float-action', action: 'formats', key: 'k', media: floatMedia },
+    (m) => m.t === 'ack' && m.ref === 'float-action'
+  )
+  ok('panel eylemi yanıtlandı', !!act && act.ok === true, JSON.stringify(act))
+  ok('Formatlar… ana pencereye yönlendirildi', floatCalls.some((c) => c.type === 'openFormats'))
+  wsFloat.close()
   await sleep(150)
 
-  // Kökensiz (web sayfası) bağlantı kodla eşleşse bile float gönderemez
-  const wsNull = new WebSocket(`ws://127.0.0.1:${ext.status.port}`)
-  const pairedNull = await new Promise<boolean>((res) => {
-    wsNull.on('open', () =>
-      wsNull.send(
-        JSON.stringify({ t: 'hello', client: 'WebPage', version: '1.0.0', pairingCode: 'TEST01' })
-      )
-    )
-    wsNull.on('message', (d) => {
-      const m = JSON.parse(d.toString())
-      if (m.t === 'welcome' && m.paired === true) res(true)
-    })
-    wsNull.on('error', () => res(false))
-    setTimeout(() => res(false), 2000)
-  })
-  ok('kökensiz istemci kodla eşleşebilir (eski uyumluluk)', pairedNull)
-
+  // Kökensiz (web sayfası) eşleşmiş bağlantı panel isteği gönderemez
   const denied = await new Promise<any>((res) => {
-    const h = (d) => {
+    const h = (d: any) => {
       const m = JSON.parse(d.toString())
       if (m.t === 'ack' && m.ok === false) {
-        wsNull.off('message', h)
+        ws2.off('message', h)
         res(m)
       }
     }
-    wsNull.on('message', h)
-    wsNull.send(
-      JSON.stringify({
-        t: 'float',
-        state: 'show',
-        media: { url: 'https://x/y.mp4' },
-        rect: { x: 0, y: 0, width: 10, height: 10 }
-      })
-    )
-    setTimeout(() => res(null), 2500)
+    ws2.on('message', h)
+    ws2.send(JSON.stringify({ t: 'float-formats', media: floatMedia }))
+    setTimeout(() => {
+      ws2.off('message', h)
+      res(null)
+    }, 2500)
   })
-  ok('eklenti dışı kökende float reddedilir', !!denied && /köken/.test(denied.message || ''), denied?.message)
-  wsNull.close()
-  await sleep(150)
+  ok(
+    'eklenti dışı kökende panel isteği reddedilir',
+    !!denied && /köken/.test(denied.message || ''),
+    denied?.message
+  )
 
   // --- İndirme isteği ---
   const beforeDl = mgrExt.list().length
@@ -976,6 +1030,9 @@ async function main() {
     ff.isGenericPage('https://www.instagram.com/') &&
       ff.isGenericPage('https://www.instagram.com/explore/') &&
       ff.isGenericPage('https://www.instagram.com/reels/') &&
+      ff.isGenericPage('https://www.instagram.com/reels/audio/123456/') &&
+      ff.isGenericPage('https://www.instagram.com/kullanici/') &&
+      ff.isGenericPage('https://www.reddit.com/r/aww/') &&
       ff.isGenericPage('https://www.youtube.com/') &&
       ff.isGenericPage('https://x.com/home') &&
       ff.isGenericPage('')
@@ -984,6 +1041,9 @@ async function main() {
     'tek gönderi/video sayfası çözülebilir sayılır',
     !ff.isGenericPage('https://www.instagram.com/p/CxYz123/') &&
       !ff.isGenericPage('https://www.instagram.com/reel/CxYz123/') &&
+      !ff.isGenericPage('https://www.instagram.com/reels/CxYz123/') &&
+      !ff.isGenericPage('https://www.instagram.com/reels/CxYz123/?igsh=abc') &&
+      !ff.isGenericPage('https://www.reddit.com/r/test/comments/abc123/baslik/') &&
       !ff.isGenericPage('https://www.youtube.com/watch?v=abc123') &&
       !ff.isGenericPage('https://x.com/user/status/123456') &&
       !ff.isGenericPage('https://www.tiktok.com/@user/video/123')
@@ -1035,6 +1095,20 @@ async function main() {
     JSON.stringify(auds)
   )
 
+  // YouTube'un HLS (m3u8) kopyaları aynı çözünürlükte DASH akışından daha
+  // yüksek bit hızlı görünür; ama ayrı sesle birleştirilemedikleri için
+  // varsayılan seçim DASH olmalı.
+  const hlsRows = ff.formatsFromProbe([
+    { formatId: '135', ext: 'mp4', resolution: '854x480', fps: 30, vcodec: 'avc1', acodec: null, tbr: 364, sizeBytes: 40922653, note: '', isAudioOnly: false, protocol: 'https' },
+    { formatId: '231', ext: 'mp4', resolution: '854x480', fps: 30, vcodec: 'avc1', acodec: null, tbr: 1011, sizeBytes: null, note: '', isAudioOnly: false, protocol: 'm3u8_native', hls: true },
+    { formatId: '251', ext: 'webm', resolution: null, fps: null, vcodec: null, acodec: 'opus', tbr: 137, sizeBytes: 15415589, note: '', isAudioOnly: true, protocol: 'https' },
+    { formatId: '251h', ext: 'webm', resolution: null, fps: null, vcodec: null, acodec: 'opus', tbr: 200, sizeBytes: null, note: '', isAudioOnly: true, protocol: 'm3u8_native', hls: true }
+  ])
+  const hlsVid = hlsRows.find((r) => r.kind === 'video')
+  const hlsAud = hlsRows.find((r) => r.kind === 'audio')
+  ok('HLS video kopyası yerine DASH akışı seçilir', hlsVid?.formatId === '135', hlsVid?.formatId)
+  ok('HLS ses kopyası yerine DASH sesi seçilir', hlsAud?.formatId === '251', hlsAud?.formatId)
+
   const sourceMedia = {
     url: 'https://cdn.example.com/1080.mp4',
     pageUrl: 'https://example.com/watch',
@@ -1084,6 +1158,135 @@ async function main() {
     JSON.stringify(audioRowsOnly)
   )
 
+  // Reddit gibi: oynatıcı tek bir doğrudan mp4 <source> sunar, sayfa ise bir
+  // ekstraktördür. Tek kaynak tek satır verdiği için önce yt-dlp denenmeli;
+  // tam kalite + ses listesi oradan gelir.
+  const extractorMedia = {    url: 'https://v.redd.it/abc123/DASH_720.mp4',
+    pageUrl: 'https://www.reddit.com/r/test/comments/abc123/baslik/',
+    title: 'Örnek',
+    kind: 'video' as const,
+    direct: true,
+    needsExtractor: true,
+    sources: [{ url: 'https://v.redd.it/abc123/DASH_720.mp4', mime: 'video/mp4' }]
+  }
+  ok(
+    'ekstraktör sayfasında kaynak olsa da önce yt-dlp denenir',
+    ff.probeFirstTarget(extractorMedia) === extractorMedia.pageUrl,
+    ff.probeFirstTarget(extractorMedia)
+  )
+  ok(
+    'tek doğrudan kaynak tek satır verir (tam liste yt-dlp’den)',
+    ff.formatsFromSources(extractorMedia, { audioExtract: true }).filter(
+      (r) => r.kind === 'video'
+    ).length === 1
+  )
+  ok(
+    'ekstraktör olmayan sitede kaynak listesi yeterli',
+    ff.probeFirstTarget({
+      url: 'https://cdn.example.com/1080.mp4',
+      pageUrl: 'https://example.com/watch',
+      needsExtractor: false
+    }) === null
+  )
+  ok(
+    'akış/profil sayfasında (gönderi adresi yok) yt-dlp denenmez',
+    ff.probeFirstTarget({
+      url: 'https://cdn.example.com/1080.mp4',
+      pageUrl: 'https://www.reddit.com/r/aww/',
+      needsExtractor: true
+    }) === null
+  )
+
+  // Oynatıcı kaliteleri gizli bir HLS manifestinde tutuyorsa (Reddit) panel
+  // manifesti yt-dlp'ye çözdürür: tek <source> yerine tüm kaliteler çıkar.
+  const hasYtdlp = spawnSync('yt-dlp', ['--version'], { encoding: 'utf8' }).status === 0
+  if (!hasYtdlp) {
+    console.log('  - yt-dlp bulunamadı: manifest sondası atlandı')
+  } else {
+    const { YtdlpRunner } = await import(mod(join(root, 'tests', '.build', 'ytdlp.mjs')))
+    const runner = new YtdlpRunner(
+      {
+        findYtdlp: () => 'yt-dlp',
+        findFfmpeg: () => 'ffmpeg',
+        missingYtdlpError: () => new Error('yt-dlp yok')
+      },
+      join(outDir, 'ytdlp-tmp')
+    )
+    const manifestProbe = await runner.probe({
+      url: `${base}/master.m3u8`,
+      useCookies: false,
+      impersonate: false
+    })
+    const manifestRows = ff.formatsFromProbe(manifestProbe.formats)
+    const manifestVids = manifestRows.filter((r) => r.kind === 'video')
+    ok(
+      'HLS manifestinden tüm video kaliteleri çıkar',
+      manifestProbe.ok &&
+        manifestVids.length >= 2 &&
+        manifestVids[0].label === '720p' &&
+        manifestVids[1].label === '360p',
+      `satır=${JSON.stringify(manifestVids.map((v) => v.label))} ok=${manifestProbe.ok} hata=${manifestProbe.error || ''}`
+    )
+    ok(
+      'manifest satırları manifest adresini taşıyabilir',
+      manifestVids.every((r) => typeof r.formatId === 'string' && r.formatId.length > 0)
+    )
+  }
+
+  /* ---------------- Yüzen panel: uygulama tarafı ---------------- */
+  section('Yüzen panel — uygulama köprüsü (FloatService)')
+  const fsvcMod = await import(mod(join(root, 'tests', '.build', 'floatService.mjs')))
+  const fstore = new FakeStore(makeSettings())
+  let probeCount = 0
+  const svcCalls: any[] = []
+  const svc = new fsvcMod.FloatService({
+    store: fstore,
+    probeFormats: async () => {
+      probeCount++
+      return {
+        ok: true,
+        formats: [
+          { formatId: 'h1080', kind: 'video', label: '1080p', best: true },
+          { formatId: 'a1', kind: 'audio', label: 'M4A' }
+        ]
+      }
+    },
+    download: async (m: any, k: string, f: any) => {
+      svcCalls.push({ m, k, f })
+      return { ok: true, message: 'kuyruğa eklendi' }
+    },
+    openFormats: (m: any) => svcCalls.push({ open: m.url }),
+    showMainWindow: () => svcCalls.push({ show: true })
+  })
+  const svcMedia = {
+    url: 'https://cdn.example.com/v.mp4',
+    pageUrl: 'https://example.com/watch',
+    title: 'V',
+    kind: 'video' as const
+  }
+  const firstList = await svc.formats(svcMedia, 'k1')
+  ok(
+    'FloatService kalite listesi üretir',
+    firstList.ok && firstList.formats.length === 2 && firstList.language === 'tr',
+    JSON.stringify(firstList)
+  )
+  await svc.formats(svcMedia, 'k1')
+  ok('aynı medya için sonda tekrarlanmaz', probeCount === 1, String(probeCount))
+  const chosen = await svc.download(svcMedia, 'video', 'h1080', 'k1')
+  ok('seçilen satır indirilir', chosen.ok && svcCalls[0]?.f?.formatId === 'h1080')
+  const chosenAudio = await svc.download(svcMedia, 'audio', undefined, 'k1')
+  ok(
+    'format kimliği yoksa en iyi ses satırı seçilir',
+    chosenAudio.ok && svcCalls[1]?.f?.formatId === 'a1'
+  )
+  const chosenBad = await svc.download(svcMedia, 'video', 'yok', 'k1')
+  ok('bilinmeyen satır indirilmez', chosenBad.ok === false)
+  fstore.getSettings().extension.floatingPanel = false
+  const offList = await svc.formats(svcMedia, 'k1')
+  ok('panel ayarı kapalıyken liste verilmez', offList.ok === false && offList.formats.length === 0)
+  const offDl = await svc.download(svcMedia, 'video', undefined, 'k1')
+  ok('panel ayarı kapalıyken indirme yapılmaz', offDl.ok === false)
+
   /* ---------------- Yüzen panel: boyut sorgusu ---------------- */
   section('Yüzen panel — kalite satırlarının boyutları')
   const fsizes = await import(mod(join(root, 'tests', '.build', 'floatSizes.mjs')))
@@ -1115,6 +1318,26 @@ async function main() {
     { timeoutMs: 1, budgetMs: 0 }
   )
   ok('bütçe dolunca beklemeden döner', noWait[0].sizeBytes === undefined)
+
+  /* ---------------- Medya: birleştirme sonrası çıktı yolu ---------------- */
+  section('Medya — birleştirme sonrası çıktı yolu')
+  const fragOut = join(root, 'tests', '.build', 'out.f251.webm')
+  const mergedOut = join(root, 'tests', '.build', 'out.mkv')
+  writeFileSync(fragOut, 'parca')
+  writeFileSync(mergedOut, 'birlesmis')
+  ok(
+    'birleşmiş dosya parça adına tercih edilir',
+    pickExistingOutput([fragOut, mergedOut], 'yedek') === mergedOut,
+    pickExistingOutput([fragOut, mergedOut], 'yedek')
+  )
+  unlinkSync(mergedOut)
+  ok(
+    'silinen son yol atlanır, var olan seçilir',
+    pickExistingOutput([fragOut, mergedOut], 'yedek') === fragOut
+  )
+  unlinkSync(fragOut)
+  ok('hiçbiri yoksa son bildirilen yol', pickExistingOutput([mergedOut], 'yedek') === mergedOut)
+  ok('boş liste yedeğe düşer', pickExistingOutput([], 'yedek') === 'yedek')
 
   /* ---------------- Sonuçlar ---------------- */
   server.close()

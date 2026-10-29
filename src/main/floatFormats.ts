@@ -56,6 +56,19 @@ const GENERIC_SEGMENTS = new Set([
   'settings'
 ])
 
+/** `/reels/` altında gönderi kimliği olmayan alt yollar (ses/hikâye listeleri). */
+const NOT_ITEM_SEGMENTS = new Set(['audio', 'highlights', 'saved', 'liked'])
+
+/**
+ * Liste kökü gibi görünen ama aslında tek bir gönderi olan yol
+ * (Instagram'da bir reel açılınca adres `/reels/{kod}/` olur).
+ */
+function isSingleItemPath(segments: string[]): boolean {
+  if (segments[0] !== 'reels') return false
+  const id = segments[1] || ''
+  return /^[a-z0-9_-]{5,}$/.test(id) && !NOT_ITEM_SEGMENTS.has(id)
+}
+
 /**
  * Adres tek bir video/gönderi mi? Ana sayfa, keşfet, profil, akış gibi
  * listeleme sayfalarını yt-dlp çözemez ("Unsupported URL"); bu durumda ham
@@ -79,6 +92,18 @@ export function isGenericPage(url: string | null | undefined): boolean {
     .filter(Boolean)
     .map((s) => s.toLowerCase())
   if (segments.length === 0) return true
+  // `/reels/` bir liste sayfasıdır, `/reels/{kod}/` ise tek bir reel.
+  if (isSingleItemPath(segments)) return false
+
+  const host = parsed.hostname.replace(/^www\./i, '').toLowerCase()
+  // Reddit'te /r/{alt}/ ve /user/{ad}/ liste sayfasıdır; tek gönderide
+  // adreste /comments/ bulunur.
+  if (/(^|\.)reddit\.com$/i.test(host) && !segments.includes('comments')) {
+    if (segments[0] === 'r' || segments[0] === 'user' || segments[0] === 'u') return true
+  }
+  // Instagram'da tek parçalı yol bir profildir (gönderi yolları yukarıda elendi).
+  if (/(^|\.)instagram\.com$/i.test(host) && segments.length === 1) return true
+
   return GENERIC_SEGMENTS.has(segments[0])
 }
 
@@ -119,8 +144,36 @@ export function heightOf(resolution: string | null | undefined): number | null {
   return null
 }
 
+/**
+ * Ekstraktör sitelerinde (Reddit, YouTube, Instagram…) oynatıcının `<source>`
+ * listesi çoğu zaman tek bir kopyadır — Reddit'in doğrudan mp4'ü gibi. Tam
+ * kalite listesi (ve ayrı ses dosyaları) için önce yt-dlp denenmelidir.
+ *
+ * Dönen değer yt-dlp'ye verilecek sayfa adresidir; bu sayfa tek bir video
+ * değilse (akış/profil) ya da site ekstraktör değilse `null`.
+ */
+export function probeFirstTarget(
+  media: Pick<FloatMediaInfo, 'needsExtractor' | 'pageUrl' | 'url'>
+): string | null {
+  if (!media.needsExtractor) return null
+  const target = media.pageUrl || media.url || ''
+  if (!/^https?:\/\//i.test(target)) return null
+  if (isGenericPage(target)) return null
+  return target
+}
+
 function score(f: MediaFormat): number {
   return f.tbr || 0 || (f.sizeBytes ? f.sizeBytes / 1024 : 0)
+}
+
+/**
+ * Aynı kalite grubunda hangi biçim daha iyi?
+ * HLS (m3u8) akışları ayrı ses akışıyla birleştirilemediği için DASH
+ * (https) kopyası varsa o seçilir; yoksa yüksek bit hızlı olan kazanır.
+ */
+function betterFormat(a: MediaFormat, b: MediaFormat): boolean {
+  if (!!a.hls !== !!b.hls) return !a.hls
+  return score(a) > score(b)
 }
 
 function videoDetail(f: MediaFormat): string {
@@ -156,14 +209,14 @@ export function formatsFromProbe(
       if (!f.acodec) continue
       const key = (f.ext || 'audio').toLowerCase()
       const prev = audios.get(key)
-      if (!prev || score(f) > score(prev)) audios.set(key, f)
+      if (!prev || betterFormat(f, prev)) audios.set(key, f)
       continue
     }
     if (!f.vcodec) continue
     const height = heightOf(f.resolution)
     const key = height ? `h${height}` : (f.resolution || f.ext || 'v').toLowerCase()
     const prev = videos.get(key)
-    if (!prev || score(f) > score(prev.f)) videos.set(key, { f, height })
+    if (!prev || betterFormat(f, prev.f)) videos.set(key, { f, height })
   }
 
   const videoRows: FloatFormat[] = [...videos.values()]

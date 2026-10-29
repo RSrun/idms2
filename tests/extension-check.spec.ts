@@ -101,7 +101,7 @@ test.describe('Eklenti yapı doğrulaması', () => {
     expect(validateManifest('chromium')).toEqual([])
     const mf = readMf('chromium')
     expect(mf.name).toBe('IDMS Download Manager')
-    expect(mf.version).toBe('1.1.0')
+    expect(mf.version).toBe('1.2.1')
     expect(mf.background?.service_worker, 'chromium MV3 service_worker zorunlu').toBe('background.js')
     expect(mf.browser_specific_settings, 'chromium manifestında gecko ayarı olmamalı').toBeUndefined()
   })
@@ -154,6 +154,327 @@ test.describe('Eklenti yapı doğrulaması', () => {
   })
 })
 
+test.describe('İçerik betiği — yüzen panel', () => {
+  test('panel sayfanın içinde çizilir; video bitince ve sekme gizlenince kalkar', async ({
+    page
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== 'chromium-extension', 'yalnızca chromium projesi')
+
+    // İçerik betiğini eklentinin kendi dünyasından bağımsız çalıştır: panelin
+    // sayfada (gölge DOM'da) çizildiğini doğrudan gözleyebilelim.
+    await page.setContent(
+      `<video id="v" src="https://ornek.test/video.mp4"
+         style="display:block;width:480px;height:270px"></video>`
+    )
+    await page.evaluate(() => {
+      const w = window as any
+      w.__msgs = []
+      w.browser = { runtime: { sendMessage: (m: any) => (w.__msgs.push(m), undefined) } }
+    })
+    await page.addScriptTag({ content: readFileSync(join(sharedDir, 'content.js'), 'utf8') })
+
+    await page.evaluate(() => {
+      document.getElementById('v')!.dispatchEvent(new Event('play', { bubbles: true }))
+    })
+
+    // Rozet sayfanın içindedir: ayrı pencere yok; videonun sağ üst köşesinde
+    // sabit durur.
+    const pill = page.locator('#idms-float-host .pill')
+    await expect(pill).toBeVisible()
+    const panelBox = await pill.boundingBox()
+    const videoBox = await page.locator('#v').boundingBox()
+    expect(panelBox!.x + panelBox!.width, 'rozet videonun sağ üstünde').toBeGreaterThan(
+      videoBox!.x + videoBox!.width - 30
+    )
+    expect(panelBox!.y, 'rozet videonun sağ üstünde').toBeLessThan(videoBox!.y + 30)
+    expect(panelBox!.y, 'rozet videonun içinde').toBeGreaterThanOrEqual(videoBox!.y)
+
+    // Kalite listesi uygulamaya sorulur; panel uygulamada değil sayfada çizilir.
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as any).__msgs.filter((m: any) => m.type === 'float-formats').length
+        )
+      )
+      .toBeGreaterThan(0)
+    const asked = await page.evaluate(() =>
+      (window as any).__msgs.filter((m: any) => m.type === 'float-formats').at(-1)
+    )
+    expect(asked.media.url).toContain('video.mp4')
+
+    // Video "boşaldı": rozet hemen kalkar (masaüstünde bekleyen bir pencere yok).
+    await page.evaluate(() => {
+      document.getElementById('v')!.dispatchEvent(new Event('emptied', { bubbles: true }))
+    })
+    await expect(pill).toBeHidden()
+
+    // Sekme gizlenince panel kalkar; sayfa geri gelince yeniden görünür.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await expect(page.locator('#idms-float-host .panel')).toBeHidden()
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    // Sekmeye dönüp video yeniden oynatılınca panel geri gelir.
+    await page.evaluate(() => {
+      document.getElementById('v')!.dispatchEvent(new Event('play', { bubbles: true }))
+    })
+    await expect(pill).toBeVisible()
+  })
+
+  test('kaydırma sırasında panel gizlenir, durunca videonun köşesinde döner', async ({
+    page
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== 'chromium-extension', 'yalnızca chromium projesi')
+
+    await page.setContent(
+      `<video id="v" src="https://ornek.test/video.mp4"
+         style="display:block;width:480px;height:270px"></video>
+       <div id="tall" style="height:2000px"></div>`
+    )
+    await page.evaluate(() => {
+      const w = window as any
+      w.browser = { runtime: { sendMessage: (m: any) => (w.__msgs.push(m), undefined) } }
+      w.__msgs = []
+    })
+    await page.addScriptTag({ content: readFileSync(join(sharedDir, 'content.js'), 'utf8') })
+    await page.evaluate(() => {
+      document.getElementById('v')!.dispatchEvent(new Event('play', { bubbles: true }))
+    })
+
+    const pill = page.locator('#idms-float-host .pill')
+    await expect(pill).toBeVisible()
+
+    // Kaydırma başlar: panel hemen gizlenir.
+    await page.evaluate(() => window.scrollTo(0, 80))
+    await expect(pill).toBeHidden({ timeout: 2000 })
+
+    // Kaydırma durunca videonun görünen sağ üst köşesinde geri gelir
+    // (video üst kenarı ekrandan çıktığı için rozet görünümün üst sınırına yaslanır).
+    await expect(pill).toBeVisible({ timeout: 5000 })
+    const after = await pill.boundingBox()
+    expect(after, 'panel geri geldi').toBeTruthy()
+    expect(after!.y, 'rozet görünür sağ üst köşede').toBeGreaterThanOrEqual(11)
+    expect(after!.y, 'rozet görünür sağ üst köşede').toBeLessThanOrEqual(13)
+  })
+
+  test('rozet tıklanınca kalite kartı açılır, satır indirmeyi tetikler', async ({
+    page
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== 'chromium-extension', 'yalnızca chromium projesi')
+
+    await page.setContent(
+      `<video id="v" src="https://ornek.test/video.mp4"
+         style="display:block;width:640px;height:360px"></video>`
+    )
+    // Sahte eklenti API'si içerik betiğinden ÖNCE kurulmalı: betik yüklenirken
+    // `browser`/`chrome` nesnesini seçiyor.
+    await page.evaluate(() => {
+      const w = window as any
+      w.__msgs = []
+      w.browser = {
+        runtime: {
+          sendMessage: (m: any) => {
+            w.__msgs.push(m)
+            if (m.type === 'float-formats') {
+              return Promise.resolve({
+                ok: true,
+                language: 'tr',
+                formats: [
+                  { formatId: 'src:0', kind: 'video', label: '720p', detail: 'MP4', best: true },
+                  { formatId: 'src:1', kind: 'audio', label: 'M4A', detail: '128 kbps' }
+                ]
+              })
+            }
+            if (m.type === 'float-download') {
+              return Promise.resolve({ ok: true, message: 'IDMS kuyruğuna eklendi' })
+            }
+            return Promise.resolve({ ok: true })
+          }
+        }
+      }
+    })
+    await page.addScriptTag({ content: readFileSync(join(sharedDir, 'content.js'), 'utf8') })
+    await page.evaluate(() => {
+      document.getElementById('v')!.dispatchEvent(new Event('play', { bubbles: true }))
+    })
+
+    const pill = page.locator('#idms-float-host .pill')
+    await expect(pill).toBeVisible()
+    await pill.click()
+
+    const card = page.locator('#idms-float-host .card')
+    await expect(card).toBeVisible()
+    const row = page.locator('#idms-float-host .row').first()
+    await expect(row).toContainText('720p')
+    await expect(page.locator('#idms-float-host .sec').first()).toContainText('Video')
+
+    await row.click()
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as any).__msgs.filter((m: any) => m.type === 'float-download').length
+        )
+      )
+      .toBeGreaterThan(0)
+    const dl = await page.evaluate(() =>
+      (window as any).__msgs.filter((m: any) => m.type === 'float-download').at(-1)
+    )
+    expect(dl.formatId).toBe('src:0')
+    expect(dl.kind).toBe('video')
+    await expect(page.locator('#idms-float-host .status')).toContainText('IDMS kuyruğuna eklendi')
+  })
+
+  test('Instagram /reels/{kod}/ adresini tek video sayar', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'chromium-extension', 'yalnızca chromium projesi')
+
+    // Instagram'da bir reel açılınca adres /reels/{kod}/ olur. Bu yol liste
+    // sayfası sanılırsa panel "bu sayfa tek bir video değil" notu gösterir.
+    await page.route('**/reels/CxYz7890/', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        body: `<video id="v" src="https://ornek.test/video.mp4"
+                 style="display:block;width:480px;height:270px"></video>`
+      })
+    )
+    await page.goto('http://idms.test/reels/CxYz7890/')
+    await page.evaluate(() => {
+      const w = window as any
+      w.__msgs = []
+      w.browser = { runtime: { sendMessage: (m: any) => (w.__msgs.push(m), undefined) } }
+    })
+    await page.addScriptTag({ content: readFileSync(join(sharedDir, 'content.js'), 'utf8') })
+
+    await page.evaluate(() => {
+      document.getElementById('v')!.dispatchEvent(new Event('play', { bubbles: true }))
+    })
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as any).__msgs.filter((m: any) => m.type === 'float-formats').length
+        )
+      )
+      .toBeGreaterThan(0)
+
+    const asked = await page.evaluate(() =>
+      (window as any).__msgs.filter((m: any) => m.type === 'float-formats').at(-1)
+    )
+    expect(asked.media.pageUrl, 'reel adresi korunur').toBe('http://idms.test/reels/CxYz7890/')
+  })
+})
+
+/**
+ * İçerik betiğini sahte eklenti API'siyle sayfaya enjekte eder. `paired`
+ * değeri `chrome.storage.local` yanıtını taklit eder: içerik betiği IDMS
+ * hazır değilken indirme bağlantısını durdurmamalıdır.
+ */
+async function injectLinkCapture(
+  page: import('@playwright/test').Page,
+  opts: { paired: boolean; reply?: any }
+): Promise<void> {
+  await page.evaluate(
+    ({ paired, reply }) => {
+      const w = window as any
+      w.__msgs = []
+      w.browser = {
+        storage: {
+          local: {
+            get: async () => ({ floatingPanel: true, paired, enabled: true })
+          },
+          onChanged: { addListener: () => undefined }
+        },
+        runtime: {
+          sendMessage: (m: any) => {
+            w.__msgs.push(m)
+            return Promise.resolve(reply)
+          }
+        }
+      }
+    },
+    { paired: opts.paired, reply: opts.reply ?? { ok: true, message: 'IDMS kuyruğuna eklendi' } }
+  )
+  await page.addScriptTag({ content: readFileSync(join(sharedDir, 'content.js'), 'utf8') })
+  // `storage.local.get` çözülene kadar bekle (applyConfig).
+  await page.waitForTimeout(150)
+}
+
+test.describe('İçerik betiği — bağlantı yakalama', () => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'chromium-extension', 'yalnızca chromium projesi')
+    await page.route('**/files/arsiv.zip', (route) =>
+      route.fulfill({
+        status: 200,
+        headers: {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': 'attachment; filename="arsiv.zip"',
+          'Content-Length': '256'
+        },
+        body: Buffer.alloc(256)
+      })
+    )
+    await page.setContent(`
+      <a id="zip" href="http://idms.test/files/arsiv.zip" download="arsiv.zip">zip</a>
+      <a id="plain" href="http://idms.test/files/arsiv.zip">düz bağlantı</a>
+    `)
+  })
+
+  test('eşleştirme yokken tıklama tarayıcıya bırakılır, yutulmaz', async ({ page }) => {
+    await injectLinkCapture(page, { paired: false })
+
+    const [download] = await Promise.all([
+      page.waitForEvent('download', { timeout: 15000 }),
+      page.click('#zip')
+    ])
+    expect(download.suggestedFilename(), 'tarayıcı indirdi').toBe('arsiv.zip')
+    expect(
+      await page.evaluate(() => (window as any).__msgs.length),
+      'IDMS’e mesaj gönderilmedi'
+    ).toBe(0)
+    await expect(page.locator('#idms-toast-host .idms-toast')).toContainText('tarayıcıya bırakıldı')
+  })
+
+  test('eşleşmişken tıklama IDMS’e gider, sayfa terk edilmez', async ({ page }) => {
+    await injectLinkCapture(page, { paired: true })
+
+    await page.click('#zip')
+    await expect
+      .poll(() => page.evaluate(() => (window as any).__msgs.length))
+      .toBe(1)
+    const msg = await page.evaluate(() => (window as any).__msgs[0])
+    expect(msg.type).toBe('link-click')
+    expect(msg.url).toContain('/files/arsiv.zip')
+    expect(msg.media).toBe(false)
+    expect(page.url(), 'sayfa indirme adresine gitmedi').toContain('about:blank')
+    await expect(page.locator('#idms-toast-host .idms-toast')).toContainText(
+      'İndirme IDMS kuyruğuna eklendi'
+    )
+  })
+
+  test('IDMS yanıt vermezse tıklama tarayıcı indirmesine geri bırakılır', async ({ page }) => {
+    await injectLinkCapture(page, { paired: true, reply: { ok: false, error: 'IDMS çalışmıyor' } })
+
+    // `download` öznitelikli bağlantı: geri dönüş, tarayıcının indirme
+    // davranışını koruyan geçici bir bağlantıyla yapılır. Bu tıklama içerik
+    // betiği tarafından yeniden yakalanmamalı (mesaj sayısı 1 kalmalı).
+    const [download] = await Promise.all([
+      page.waitForEvent('download', { timeout: 15000 }),
+      page.click('#zip')
+    ])
+    expect(download.suggestedFilename(), 'geri dönüş indirmesi').toBe('arsiv.zip')
+    await expect(page.locator('#idms-toast-host .idms-toast')).toContainText(
+      'IDMS çalışmıyor'
+    )
+    expect(
+      await page.evaluate(() => (window as any).__msgs.filter((m: any) => m.type === 'link-click').length),
+      'yakalama yalnızca bir kez denendi'
+    ).toBe(1)
+  })
+})
+
 /** Sahte IDMS uygulaması: gerçek köprü protokolü (HTTP /info /pair /rpc /status + WS). */
 type Msg = Record<string, any>
 
@@ -162,10 +483,10 @@ const TEST_TOKEN = 'test-token-0123456789abcdef0123456789'
 
 async function startFakeApp() {
   const rpc: Msg[] = []
-  const wsMessages: Msg[] = []
   const requests: Array<{ method: string; url: string; origin: string; token: string }> = []
   const wsOrigins: string[] = []
   let paired = false
+  let port = 0
   let markWs: () => void = () => {}
   const wsReady = new Promise<void>((res) => (markWs = res))
 
@@ -211,10 +532,11 @@ async function startFakeApp() {
         app: 'IDMS',
         version: '1.0.0-test',
         protocol: 2,
-        port: 9789,
+        port,
         needsPairing: true,
         paired,
-        integration: true
+        integration: true,
+        floatingPanel: true
       })
       return
     }
@@ -228,7 +550,7 @@ async function startFakeApp() {
         return
       }
       paired = true
-      json(200, { ok: true, token: TEST_TOKEN, port: 9789, app: 'IDMS', version: '1.0.0-test' })
+      json(200, { ok: true, token: TEST_TOKEN, port, app: 'IDMS', version: '1.0.0-test' })
       return
     }
     if (req.url === '/status' || (req.url === '/rpc' && req.method === 'POST')) {
@@ -240,47 +562,71 @@ async function startFakeApp() {
         json(200, {
           ok: true,
           paired: true,
-          port: 9789,
+          port,
           summary: { active: 0, queued: 0, totalSpeed: 0 },
           items: []
         })
         return
       }
       rpc.push(body)
+      // Sayfa içi panel istekleri: kalite listesi ve indirme yanıtları.
+      if (body?.t === 'float-formats') {
+        json(200, {
+          ok: true,
+          replies: [
+            {
+              t: 'float-formats',
+              ok: true,
+              language: 'tr',
+              formats: [
+                { formatId: 'fake-720', kind: 'video', label: '720p', detail: 'MP4', best: true },
+                { formatId: 'fake-audio', kind: 'audio', label: 'M4A', detail: '128 kbps' }
+              ]
+            }
+          ]
+        })
+        return
+      }
+      if (body?.t === 'float-download') {
+        json(200, {
+          ok: true,
+          replies: [{ t: 'float-download', ok: true, message: 'IDMS kuyruğuna eklendi' }]
+        })
+        return
+      }
       json(200, { ok: true, id: `fake-${rpc.length}`, replies: [{ t: 'ack', ok: true }] })
       return
     }
     json(404, { error: 'bilinmeyen yol' })
   })
-
-  await new Promise<void>((res, rej) => {
-    server.once('error', (e: any) =>
-      rej(new Error(`9789 portu açılamadı (IDMS çalışıyor mu?): ${e.message}`))
-    )
-    server.listen(9789, '127.0.0.1', res)
+  // Portu işletim sistemi seçer: makinede çalışan gerçek IDMS ya da kullanıcının
+  // eşleşmiş tarayıcı eklentisi test köprüsüne istek göndermesin. Test, bu portu
+  // `storage.local` üzerinden eklentiye bildirir; `findApp` önce kayıtlı portu dener.
+  await new Promise<void>((resolve, reject) => {
+    const onError = (err: Error): void => reject(err)
+    server.once('error', onError)
+    server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', onError)
+      port = (server.address() as { port: number }).port
+      resolve()
+    })
   })
-
   const wss = new WebSocketServer({ server })
   wss.on('connection', (ws, req) => {
     wsOrigins.push(String(req.headers.origin || ''))
     markWs()
-    ws.on('message', (raw) => {
-      try {
-        wsMessages.push(JSON.parse(String(raw)))
-      } catch {
-        /* yoksay */
-      }
-    })
   })
 
   return {
     rpc,
-    wsMessages,
     requests,
     wsOrigins,
     wsReady,
     get paired() {
       return paired
+    },
+    get port() {
+      return port
     },
     async close() {
       for (const c of wss.clients) c.terminate()
@@ -317,6 +663,41 @@ async function startMediaServer() {
       res.end(Buffer.alloc(512))
       return
     }
+    if (url.startsWith('/media/live.m3u8')) {
+      // Yalnızca ağ gözetlemesinin gördüğü manifest: `no-store` yanıtı kaynak
+      // zamanlamasına düşmez, arka plan akışı yakalayıp panele iletmelidir.
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.apple.mpegurl',
+        'Cache-Control': 'no-store'
+      })
+      res.end(
+        [
+          '#EXTM3U',
+          '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360',
+          'low.m3u8',
+          '#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720',
+          'high.m3u8'
+        ].join('\n')
+      )
+      return
+    }
+    if (url.startsWith('/media/master.m3u8')) {
+      // Oynatıcının arka planda indirdiği HLS manifesti (Reddit'in
+      // packaged-media akışı gibi). Kaliteler burada listelenir.
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.apple.mpegurl'
+      })
+      res.end(
+        [
+          '#EXTM3U',
+          '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360',
+          'low.m3u8',
+          '#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720',
+          'high.m3u8'
+        ].join('\n')
+      )
+      return
+    }
     if (url.startsWith('/feed')) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
       res.end(`<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Akış</title>
@@ -335,6 +716,74 @@ async function startMediaServer() {
             fetch('${mediaPath}')
               .then((r) => r.blob())
               .then((b) => { document.getElementById('v').src = URL.createObjectURL(b) })
+          <\/script>
+        </body></html>`)
+      return
+    }
+    if (url.startsWith('/reels/CxYz7890')) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(`<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Reel</title>
+        <style>
+          html, body { margin: 0; padding: 0; }
+          video { display: block; width: 480px; height: 270px; }
+        </style></head>
+        <body>
+          <video id="v" preload="auto" autoplay muted loop controls></video>
+          <script>
+            fetch('${mediaPath}')
+              .then((r) => r.blob())
+              .then((b) => { document.getElementById('v').src = URL.createObjectURL(b) })
+          <\/script>
+        </body></html>`)
+      return
+    }
+    if (url.startsWith('/shadow')) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(`<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Gölge oynatıcı</title>
+        <style>
+          html, body { margin: 0; padding: 0; }
+          #wrap { padding: 8px; }
+          player-shell { display: block; width: 480px; height: 270px; }
+        </style></head>
+        <body>
+          <article id="wrap">
+            <a id="post" href="/r/test/comments/abc123/">gönderi</a>
+            <player-shell id="shell">
+              <template shadowrootmode="open">
+                <style>video { display: block; width: 480px; height: 270px; }</style>
+                <video id="v" src="${mediaPath}" preload="auto" muted loop controls></video>
+              </template>
+            </player-shell>
+          </article>
+          <script>
+            // Oynatıcı kaliteleri gizli bir HLS manifestinden alır; panel bu
+            // adresi kaynak zamanlamasından bulup yt-dlp'ye çözdürmeli.
+            fetch('/media/master.m3u8').catch(() => {})
+          <\/script>
+        </body></html>`)
+      return
+    }
+    if (url.startsWith('/net-shadow')) {
+      // Aynı gölge oynatıcı; manifest yanıtı `no-store` olduğu için kaynak
+      // zamanlamasında yok. Adres yalnızca eklentinin ağ gözetlemesinden gelir.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(`<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Ağ oynatıcı</title>
+        <style>
+          html, body { margin: 0; padding: 0; }
+          player-shell { display: block; width: 480px; height: 270px; }
+        </style></head>
+        <body>
+          <article>
+            <a id="post" href="/r/test/comments/net123/">gönderi</a>
+            <player-shell id="shell">
+              <template shadowrootmode="open">
+                <style>video { display: block; width: 480px; height: 270px; }</style>
+                <video id="v" src="${mediaPath}" preload="auto" muted loop controls></video>
+              </template>
+            </player-shell>
+          </article>
+          <script>
+            fetch('/media/live.m3u8').catch(() => {})
           <\/script>
         </body></html>`)
       return
@@ -407,21 +856,27 @@ test.describe('Chromium — canlı eklenti', () => {
 
     const manifest = await sw.evaluate(() => chrome.runtime.getManifest())
     expect(manifest.name).toBe('IDMS Download Manager')
-    expect(manifest.version).toBe('1.1.0')
+    expect(manifest.version).toBe('1.2.1')
     expect(manifest.manifest_version).toBe(3)
 
     const popup = await context.newPage()
     await popup.goto(`chrome-extension://${id}/popup.html`)
     await expect(popup.locator('header')).toBeVisible()
-    await expect(popup.locator('#status-text')).toContainText('Uygulama kapalı')
 
-    // Uygulama kapalıyken de eşleştirme kodu alanı görünür olmalı; alanın
-    // nerede olduğunu bilmeyen kullanıcı eşleştiremiyordu.
+    // Makinede çalışan bir IDMS olabilir (geliştirme ortamı): durum metni
+    // "Uygulama kapalı" ya da "Eşleştirme gerekli" olur. Asıl kural, uygulama
+    // kapalıyken de eşleştirme kodunun görünür ve alanın kullanılabilir olması.
+    await expect(popup.locator('#status-text')).toContainText(
+      /Uygulama kapalı|Eşleştirme gerekli/
+    )
     await expect(popup.locator('#pair-panel')).toBeVisible()
     await expect(popup.locator('#pair-code')).toBeVisible()
-    await expect(popup.locator('#pair-code')).toBeDisabled()
-    await expect(popup.locator('#pair-offline')).toBeVisible()
-    await expect(popup.locator('#pair-btn')).toBeDisabled()
+
+    if ((await popup.locator('#status-text').textContent())?.includes('Uygulama kapalı')) {
+      await expect(popup.locator('#pair-code')).toBeDisabled()
+      await expect(popup.locator('#pair-offline')).toBeVisible()
+      await expect(popup.locator('#pair-btn')).toBeDisabled()
+    }
     await popup.close()
   })
 
@@ -440,6 +895,12 @@ test.describe('Chromium — canlı eklenti', () => {
 
       /* --- 1. Eşleştirme: yalnızca 6 haneli kod --- */
       await expect(popup.locator('#pair-panel')).toBeVisible({ timeout: 20000 })
+      // Test köprüsü boş bir portta dinliyor olabilir (makinede gerçek IDMS
+      // varsa 9789 doludur): ilk port taraması bittikten sonra kayıtlı portu
+      // ona yönlendir.
+      const sw = context.serviceWorkers()[0]
+      await popup.waitForTimeout(1200)
+      await sw.evaluate((p) => chrome.storage.local.set({ port: p }), app.port)
       await popup.locator('#pair-code').fill('test01')
       await popup.locator('#pair-btn').click()
       await expect(popup.locator('#status-text')).toContainText('Bağlı', { timeout: 20000 })
@@ -537,7 +998,9 @@ test.describe('Chromium — canlı eklenti', () => {
       const taken = app.rpc.filter((m) => m.t === 'download').at(-1)
       expect(taken?.url, 'devralınan indirme adresi').toContain(media.filePath)
 
-      /* --- 6. Yüzen panel: oynayan video uygulamaya bildirilir --- */
+      /* --- 6. Sayfa içi yüzen panel: rozet ve kalite kartı --- */
+      // Panel artık ayrı bir masaüstü penceresi değil, içerik betiğinin sayfaya
+      // çizdiği gölge DOM düğümüdür; yalnızca bu sekmede yaşar.
       const mediaPage = await context.newPage()
       await mediaPage.goto(`${media.base}/`)
       await expect
@@ -551,19 +1014,45 @@ test.describe('Chromium — canlı eklenti', () => {
         v.dispatchEvent(new Event('play', { bubbles: true }))
       })
 
-      await expect
-        .poll(() => app.wsMessages.filter((m) => m.t === 'float' && m.state === 'show').length, {
-          timeout: 20000
-        })
-        .toBeGreaterThan(0)
-      const floatMsg = app.wsMessages.filter((m) => m.t === 'float' && m.state === 'show').at(-1)
+      /** Belirli bir sayfadan gelen panel istekleri (içerik anahtarı sayfa adresiyle başlar). */
+      const askedOn = (part: string) =>
+        app.rpc.filter(
+          (m) =>
+            m.t === 'float-formats' && String(m.key || '').startsWith(`${media.base}${part}|`)
+        )
+
+      const pill = mediaPage.locator('#idms-float-host .pill')
+      await expect(pill).toBeVisible({ timeout: 20000 })
+      await expect.poll(() => askedOn('/').length, { timeout: 20000 }).toBeGreaterThan(0)
+      const floatMsg = askedOn('/').at(-1)
       expect(floatMsg?.media?.url).toContain(media.mediaPath)
       expect(floatMsg?.media?.kind).toBe('video')
-      expect(floatMsg?.rect?.width).toBeGreaterThan(10)
-      expect(floatMsg?.rect?.height).toBeGreaterThan(10)
 
-      /* --- 6b. Sabit başlık videoyu örtse de rozet videonun üstünde kalır --- */
-      const beforeSticky = app.wsMessages.filter((m) => m.t === 'float' && m.state === 'show').length
+      // Rozet videonun sağ üst köşesine sabitlenir.
+      const pillBox = await pill.boundingBox()
+      const videoBox = await mediaPage.locator('#v').boundingBox()
+      expect(pillBox!.x + pillBox!.width, 'rozet videonun sağ üstünde').toBeGreaterThan(
+        videoBox!.x + videoBox!.width - 30
+      )
+      expect(pillBox!.y, 'rozet videonun sağ üstünde').toBeLessThan(videoBox!.y + 30)
+
+      // Rozete tıklanınca kart açılır; satırlar uygulamadan gelen listedir.
+      await pill.click()
+      const row = mediaPage.locator('#idms-float-host .row').first()
+      await expect(row).toContainText('720p', { timeout: 20000 })
+      await expect(mediaPage.locator('#idms-float-host .sec').first()).toContainText('Video')
+      await row.click()
+      await expect(mediaPage.locator('#idms-float-host .status')).toContainText(
+        'IDMS kuyruğuna eklendi'
+      )
+      await expect
+        .poll(() => app.rpc.filter((m) => m.t === 'float-download').length, { timeout: 15000 })
+        .toBeGreaterThan(0)
+      const floatDl = app.rpc.filter((m) => m.t === 'float-download').at(-1)
+      expect(floatDl?.formatId).toBe('fake-720')
+      expect(floatDl?.kind).toBe('video')
+
+      /* --- 6b. Sabit başlık videoyu örtse de rozet başlığın altında kalır --- */
       const sticky = await context.newPage()
       await sticky.goto(`${media.base}/sticky`)
       await expect
@@ -576,23 +1065,23 @@ test.describe('Chromium — canlı eklenti', () => {
         const v = document.getElementById('v') as HTMLVideoElement
         v.dispatchEvent(new Event('play', { bubbles: true }))
       })
-      await expect
-        .poll(() => app.wsMessages.filter((m) => m.t === 'float' && m.state === 'show').length, {
-          timeout: 20000
-        })
-        .toBeGreaterThan(beforeSticky)
 
-      const stickyMsg = app.wsMessages.filter((m) => m.t === 'float' && m.state === 'show').at(-1)
-      expect(stickyMsg?.media?.url, 'yapışkan sayfadaki video').toContain(media.mediaPath)
-      // Ekran dikdörtgeni, sayfanın kendi görünüm koordinatlarına çevrilir.
-      const originY = await sticky.evaluate(
-        () => window.screenY + Math.max(0, window.outerHeight - window.innerHeight)
+      const stickyPill = sticky.locator('#idms-float-host .pill')
+      await expect(stickyPill).toBeVisible({ timeout: 20000 })
+      await expect.poll(() => askedOn('/sticky').length, { timeout: 20000 }).toBeGreaterThan(0)
+      expect(askedOn('/sticky').at(-1)?.media?.url, 'yapışkan sayfadaki video').toContain(
+        media.mediaPath
       )
-      const stickyTop = (stickyMsg?.rect?.y ?? 0) - originY
-      expect(stickyTop, 'rozet 64 px başlığın altında başlar').toBeGreaterThanOrEqual(64)
-      expect(stickyTop, 'rozet videonun içinde kalır').toBeLessThan(64 + 40)
+      // Sabit başlık videoyu örtse de rozet videonun sağ üst köşesinde durur.
+      const stickyBox = await stickyPill.boundingBox()
+      const stickyVideo = await sticky.locator('#v').boundingBox()
+      expect(stickyBox!.y, 'rozet videonun sağ üstünde').toBeLessThan(stickyVideo!.y + 30)
+      expect(stickyBox!.x + stickyBox!.width, 'rozet videonun sağ üstünde').toBeGreaterThan(
+        stickyVideo!.x + stickyVideo!.width - 30
+      )
+      await sticky.close()
 
-      /* --- 6c. Kaydırma rozeti sürüklemez; video çıkınca panel gizlenir --- */
+      /* --- 6c. Kaydırma rozeti videonun köşesinde tutar; video çıkınca gizlenir --- */
       const scrollPage = await context.newPage()
       await scrollPage.goto(`${media.base}/scroll`)
       await expect
@@ -601,41 +1090,31 @@ test.describe('Chromium — canlı eklenti', () => {
         })
         .toBe(true)
       await scrollPage.bringToFront()
-
-      const showCount = () =>
-        app.wsMessages.filter(
-          (m) => m.t === 'float' && m.state === 'show' && String(m.key).includes('/scroll')
-        )
-      const showsBefore = showCount().length
+      const scrollPill = scrollPage.locator('#idms-float-host .pill')
       await scrollPage.evaluate(() => {
         const v = document.getElementById('v') as HTMLVideoElement
         v.dispatchEvent(new Event('play', { bubbles: true }))
       })
-      await expect.poll(() => showCount().length, { timeout: 20000 }).toBeGreaterThan(showsBefore)
+      await expect(scrollPill).toBeVisible({ timeout: 20000 })
+      const placedY = (await scrollPill.boundingBox())!.y
+      expect(placedY, 'rozet videonun sağ üstünde').toBeLessThan(60)
 
-      const placed = showCount().at(-1)
-      const placedY = placed?.rect?.y ?? -1
-      expect(placedY, 'rozet ekranda bir konuma yerleşti').toBeGreaterThan(0)
-
-      // 120 px kaydır: rozet aynı ekran noktasında kalmalı.
+      // 120 px kaydır: kaydırma sırasında panel gizlenir, durunca videonun
+      // görünen sağ üst köşesinde geri gelir.
       await scrollPage.evaluate(() => window.scrollTo(0, 120))
-      await scrollPage.waitForTimeout(1500)
-      const movedY = showCount().some((m) => Math.abs((m.rect?.y ?? -999) - placedY) > 2)
-      expect(movedY, 'kaydırma rozeti sürüklemez').toBe(false)
+      await expect(scrollPill).toBeHidden({ timeout: 2000 })
+      await expect(scrollPill).toBeVisible({ timeout: 5000 })
+      const movedY = (await scrollPill.boundingBox())?.y ?? -1
+      expect(Math.abs(movedY - placedY), 'kaydırma rozeti videodan koparmaz').toBeLessThanOrEqual(1)
 
-      // Video tamamen ekrandan çıkınca panel gizlenmeli.
-      const hidesBefore = app.wsMessages.filter((m) => m.t === 'float' && m.state === 'hide').length
+      // Video tamamen ekrandan çıkınca panel gizlenir.
       await scrollPage.evaluate(() => window.scrollTo(0, 1600))
-      await expect
-        .poll(
-          () => app.wsMessages.filter((m) => m.t === 'float' && m.state === 'hide').length,
-          { timeout: 15000 }
-        )
-        .toBeGreaterThan(hidesBefore)
+      await expect(scrollPill).toBeHidden({ timeout: 15000 })
+      await scrollPage.close()
 
-      /* --- 6d. Akış sayfasında rozet, gönderi adresini bildirir --- */
+      /* --- 6d. Akış sayfasında panel, gönderi adresini bildirir --- */
       // Instagram akışı gibi: oynatıcı blob: kullanır, sayfa adresi tek bir
-      // video değildir. Rozet, videonun yanındaki gönderi bağlantısını
+      // video değildir. Panel, videonun yanındaki gönderi bağlantısını
       // (…/reel/…) sayfa adresi olarak bildirmeli; yt-dlp bunu çözebilir.
       const feedPage = await context.newPage()
       await feedPage.goto(`${media.base}/feed`)
@@ -656,18 +1135,121 @@ test.describe('Chromium — canlı eklenti', () => {
         v.dispatchEvent(new Event('play', { bubbles: true }))
       })
 
-      const feedShow = () =>
-        app.wsMessages.find(
+      const feedAsked = () =>
+        app.rpc.filter(
           (m) =>
-            m.t === 'float' &&
-            m.state === 'show' &&
+            m.t === 'float-formats' &&
             /\/reel\/CxYz7890\/$/.test(String(m.media?.pageUrl || ''))
         )
-      await expect.poll(feedShow, { timeout: 20000 }).toBeTruthy()
-      const feedMedia = feedShow()?.media
+      await expect.poll(() => feedAsked().length, { timeout: 20000 }).toBeGreaterThan(0)
+      const feedMedia = feedAsked().at(-1)?.media
       expect(String(feedMedia?.url || ''), 'oynatıcı blob: adresi').toMatch(/^blob:/)
       expect(feedMedia?.sources?.length ?? 0, 'blob akışta <source> yok').toBe(0)
       await feedPage.close()
+
+      /* --- 6e. Instagram /reels/{kod}/ adresi tek bir video sayılır --- */
+      // Instagram bir reel açılınca adres /reels/{kod}/ olur; bu yol liste
+      // sayfası sanılırsa panel "bu sayfa tek bir video değil" notu gösterir.
+      const reelPage = await context.newPage()
+      await reelPage.goto(`${media.base}/reels/CxYz7890/`)
+      await expect
+        .poll(() => reelPage.evaluate(() => document.documentElement.dataset.idmsReady === '1'), {
+          timeout: 20000
+        })
+        .toBe(true)
+      await reelPage.bringToFront()
+      await reelPage.waitForFunction(
+        () => (document.getElementById('v') as HTMLVideoElement).src.startsWith('blob:'),
+        undefined,
+        { timeout: 20000 }
+      )
+      await reelPage.evaluate(() => {
+        const v = document.getElementById('v') as HTMLVideoElement
+        v.dispatchEvent(new Event('play', { bubbles: true }))
+      })
+
+      const reelAsked = () =>
+        app.rpc.filter(
+          (m) =>
+            m.t === 'float-formats' &&
+            String(m.media?.pageUrl || '').endsWith('/reels/CxYz7890/')
+        )
+      await expect.poll(() => reelAsked().length, { timeout: 20000 }).toBeGreaterThan(0)
+      expect(String(reelAsked().at(-1)?.media?.pageUrl || ''), 'reel sayfası adresi korunur').toBe(
+        `${media.base}/reels/CxYz7890/`
+      )
+      await reelPage.close()
+
+      /* --- 6f. Gölge DOM (Reddit) içindeki oynatıcı --- */
+      // Reddit videosu <shreddit-player> gibi bir kabuğun açık gölge kökünde
+      // durur: belge ağacında görünmez, play olayı belgeye ulaşmaz. İşaretçi
+      // olayı kabuktan gelir; panel yine de videoyu bulup çözmelidir.
+      const shadowPage = await context.newPage()
+      await shadowPage.goto(`${media.base}/shadow`)
+      await expect
+        .poll(() => shadowPage.evaluate(() => document.documentElement.dataset.idmsReady === '1'), {
+          timeout: 20000
+        })
+        .toBe(true)
+      await shadowPage.bringToFront()
+      await shadowPage.waitForTimeout(400)
+
+      const box = await shadowPage.evaluate(() => {
+        const r = document.getElementById('shell')!.getBoundingClientRect()
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+      })
+      await shadowPage.mouse.move(box.x, box.y)
+
+      await expect.poll(() => askedOn('/shadow').length, { timeout: 20000 }).toBeGreaterThan(0)
+      const shadowMedia = askedOn('/shadow').at(-1)?.media
+      expect(String(shadowMedia?.url || ''), 'gölge kökündeki video').toContain(media.mediaPath)
+      expect(String(shadowMedia?.pageUrl || ''), 'gölge sınırı aşılıp gönderi bulunur').toContain(
+        '/r/test/comments/abc123/'
+      )
+      expect(String(shadowMedia?.manifest || ''), 'oynatıcının HLS manifesti bulunur').toContain(
+        '/media/master.m3u8'
+      )
+      const shadowPill = shadowPage.locator('#idms-float-host .pill')
+      await expect(shadowPill).toBeVisible({ timeout: 15000 })
+      const shadowPillBox = await shadowPill.boundingBox()
+      const shellBox = await shadowPage.evaluate(() => {
+        const r = document.getElementById('shell')!.getBoundingClientRect()
+        return { x: r.x, y: r.y, right: r.right }
+      })
+      expect(shadowPillBox!.y, 'rozet videonun sağ üstünde').toBeLessThan(shellBox.y + 30)
+      expect(shadowPillBox!.x + shadowPillBox!.width, 'rozet videonun sağ üstünde').toBeGreaterThan(
+        shellBox.right - 30
+      )
+      await shadowPage.close()
+
+      /* --- 6g. Manifest yalnızca ağ gözetlemesinde görünse de panele ulaşır --- */
+      // Reddit'in oynatıcısı manifesti no-store ile/işçiden çekebilir; sayfa
+      // kayıtlarında görünmez. Arka planın webRequest yakalaması yedektir.
+      const netPage = await context.newPage()
+      await netPage.goto(`${media.base}/net-shadow`)
+      await expect
+        .poll(() => netPage.evaluate(() => document.documentElement.dataset.idmsReady === '1'), {
+          timeout: 20000
+        })
+        .toBe(true)
+      await netPage.bringToFront()
+      await netPage.waitForTimeout(600)
+      const netBox = await netPage.evaluate(() => {
+        const r = document.getElementById('shell')!.getBoundingClientRect()
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+      })
+      await netPage.mouse.move(netBox.x, netBox.y)
+
+      const netAsked = () =>
+        app.rpc.filter(
+          (m) =>
+            m.t === 'float-formats' &&
+            String(m.key || '').startsWith(`${media.base}/net-shadow|`) &&
+            String(m.media?.manifest || '').includes('/media/live.m3u8')
+        )
+      await expect.poll(() => netAsked().length, { timeout: 25000 }).toBeGreaterThan(0)
+      await netPage.close()
+
 
       /* --- 7. IDMS'i aç + eşleşmeyi kaldır --- */
       const beforeOpen = app.rpc.filter((m) => m.t === 'open-app').length

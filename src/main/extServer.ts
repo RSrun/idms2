@@ -3,9 +3,33 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from 'stream'
 import { randomBytes, timingSafeEqual } from 'crypto'
 import { WebSocketServer, WebSocket } from 'ws'
-import type { AppToExtMessage, ExtToAppMessage, ExtensionServerStatus } from '@shared/types'
+import type {
+  AppToExtMessage,
+  ExtToAppMessage,
+  ExtensionServerStatus,
+  FloatFormatsReply,
+  FloatMediaInfo
+} from '@shared/types'
 import type { Store } from './store'
 import type { DownloadManager } from './engine/manager'
+
+/**
+ * Sayfa içi yüzen panelin uygulama tarafı (FloatService bunu karşılar).
+ * Panel tarayıcıda çizildiği için konum/odak/window yönetimi yoktur.
+ */
+export interface FloatBridge {
+  readonly enabled: boolean
+  readonly language: 'tr' | 'en'
+  formats(media: FloatMediaInfo, key?: string): Promise<FloatFormatsReply>
+  download(
+    media: FloatMediaInfo,
+    kind: 'video' | 'audio',
+    formatId: string | undefined,
+    key?: string
+  ): Promise<{ ok: boolean; message?: string }>
+  openFormats(media: FloatMediaInfo): void
+  showMainWindow(): void
+}
 
 interface Client {
   id: string
@@ -30,7 +54,7 @@ const EXTENSION_SCHEMES = [
   'safari-web-extension:'
 ]
 
-const MAX_BODY = 256 * 1024
+const MAX_BODY = 512 * 1024
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
 function isExtensionOrigin(origin: string): boolean {
@@ -60,6 +84,53 @@ function safeEqual(a: string, b: string): boolean {
   const bb = Buffer.from(String(b))
   if (!ba.length || ba.length !== bb.length) return false
   return timingSafeEqual(ba, bb)
+}
+
+/**
+ * Eklentiden gelen medya bilgisini güvenli alanlara indirger.
+ * Adresler yalnızca http(s) olabilir; `javascript:` gibi şemalar atılır.
+ */
+export function sanitizeFloatMedia(media: any): FloatMediaInfo | null {
+  if (!media || typeof media.url !== 'string') return null
+  const sources = Array.isArray(media.sources)
+    ? (media.sources as any[])
+        .slice(0, 8)
+        .map((s) => ({
+          url: String(s?.url || '').slice(0, 2048),
+          mime: s?.mime ? String(s.mime).slice(0, 80) : undefined,
+          label: s?.label ? String(s.label).slice(0, 40) : undefined
+        }))
+        .filter((s) => /^https?:\/\//i.test(s.url))
+    : []
+  return {
+    url: String(media.url).slice(0, 2048),
+    pageUrl: String(media.pageUrl || '').slice(0, 2048),
+    title: String(media.title || '').slice(0, 300),
+    pageTitle: String(media.pageTitle || '').slice(0, 300),
+    kind: media.kind === 'audio' ? 'audio' : 'video',
+    duration: typeof media.duration === 'number' ? media.duration : null,
+    direct: media.direct === true,
+    needsExtractor: media.needsExtractor === true,
+    sources: sources.length ? sources : undefined,
+    manifest: /^https?:\/\//i.test(String(media.manifest || ''))
+      ? String(media.manifest).slice(0, 2048)
+      : undefined,
+    cookies: Array.isArray(media.cookies)
+      ? (media.cookies as any[])
+          .slice(0, 80)
+          .filter((c) => c && typeof c.name === 'string' && typeof c.value === 'string')
+          .map((c) => ({
+            name: String(c.name).slice(0, 120),
+            value: String(c.value).slice(0, 4096),
+            domain: String(c.domain || '').slice(0, 200),
+            path: String(c.path || '/').slice(0, 200),
+            secure: c.secure === true,
+            httpOnly: c.httpOnly === true,
+            expirationDate:
+              typeof c.expirationDate === 'number' ? c.expirationDate : undefined
+          }))
+      : undefined
+  }
 }
 
 function readJson(req: IncomingMessage): Promise<any> {
@@ -107,16 +178,37 @@ export class ExtensionServer extends EventEmitter {
   private manager: DownloadManager
   private port = 0
   private seq = 0
-  /** Yüzen paneli en son besleyen istemci (bağlantı kopunca panel kapanır) */
-  private floatClientId = ''
   private token = ''
   private allowedOrigins = new Set<string>()
   /** /pair başarısız denemeleri: origin -> zaman damgaları (ms) */
   private pairFailures = new Map<string, number[]>()
   private readonly PAIR_MAX_ATTEMPTS = 10
   private readonly PAIR_WINDOW_MS = 15 * 60 * 1000 // 15 dakika
+  private starting: Promise<boolean> | null = null
 
-  constructor(store: Store, manager: DownloadManager) {
+  constructor(
+    store: Store,
+    manager: DownloadManager,
+    /** Uygulama indirme akışı (IDM pencereleri); yoksa doğrudan kuyruğa eklenir */
+    private requestDownload?: (req: {
+      url: string
+      pageUrl?: string
+      name?: string
+      silent?: boolean
+      headers?: Record<string, string>
+    }) => Promise<{ id?: string } | null>,
+    /** Sayfa içi yüzen panelin uygulama tarafı */
+    private float?: FloatBridge,
+    /** Eklentiden gelen medya (yt-dlp) isteği; sonuç gerçekten kuyruğa eklenince döner */
+    private requestMediaDownload?: (req: {
+      url: string
+      pageUrl?: string
+      quality?: string
+      cookies?: any[]
+    }) => Promise<{ id: string } | null>,
+    /** /info ve welcome içinde bildirilen uygulama sürümü */
+    private version = '1.0.0'
+  ) {
     super()
     this.setMaxListeners(50)
     this.store = store
@@ -152,9 +244,17 @@ export class ExtensionServer extends EventEmitter {
     const cfg = this.store.getSettings().extension
     if (!cfg.enabled) return false
     if (this.httpServer) return true
-    this.syncSecret()
+    // Hızlı aç/kapa sırasında iki kez bind denenmesini engelle
+    if (this.starting) return this.starting
+    this.starting = this.startOnce(cfg.port || 9789).finally(() => {
+      this.starting = null
+    })
+    return this.starting
+  }
 
-    for (let p = cfg.port; p < cfg.port + 10; p++) {
+  private async startOnce(basePort: number): Promise<boolean> {
+    this.syncSecret()
+    for (let p = basePort; p < basePort + 10; p++) {
       try {
         await this.listen(p)
         return true
@@ -182,6 +282,11 @@ export class ExtensionServer extends EventEmitter {
 
       const onError = (err: NodeJS.ErrnoException): void => {
         server.removeListener('listening', onListening)
+        try {
+          wss.close()
+        } catch {
+          /* yoksay */
+        }
         if (err.code === 'EADDRINUSE') reject(err)
         else {
           this.emit('log', `Köprü hatası: ${err.message}`)
@@ -213,6 +318,10 @@ export class ExtensionServer extends EventEmitter {
     const headers: Record<string, string> = {
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, X-IDMS-Token',
+      // Chrome/Edge "Private Network Access": genel bir sayfadan/eklenti
+      // bağlamından 127.0.0.1'e yapılan isteklerde ön kontrol bu başlığı
+      // ister; yoksa istek tarayıcıda engellenir.
+      'Access-Control-Allow-Private-Network': 'true',
       'Access-Control-Max-Age': '600',
       Vary: 'Origin',
       'X-Content-Type-Options': 'nosniff',
@@ -228,6 +337,9 @@ export class ExtensionServer extends EventEmitter {
     payload: unknown,
     headers: Record<string, string> = {}
   ): void {
+    // İstemci uzun /rpc sırasında bağlantıyı kesmiş olabilir: yazma denemesi
+    // süreci düşürmesin.
+    if (res.writableEnded || res.destroyed) return
     const body = JSON.stringify(payload)
     res.writeHead(code, {
       'Content-Type': 'application/json; charset=utf-8',
@@ -289,7 +401,9 @@ export class ExtensionServer extends EventEmitter {
             port: this.port,
             needsPairing: true,
             paired: this.allowedOrigins.size > 0,
-            integration: cfg.enabled
+            integration: cfg.enabled,
+            /** Sayfada çizilen yüzen panel açık mı (içerik betiği bunu okur) */
+            floatingPanel: cfg.floatingPanel !== false
           },
           headers
         )
@@ -451,8 +565,10 @@ export class ExtensionServer extends EventEmitter {
       extension: { token, allowedOrigins: [] }
     })
     this.token = token
+    // Tüm istemciler düşürülür (hello ile eşleşmiş olanlar dahil)
     for (const client of [...this.clients.values()]) {
-      if (client.tokenAuthed && client.ws) {
+      client.paired = false
+      if (client.ws) {
         try {
           client.ws.close(4001, 'eşleştirme iptal edildi')
         } catch {
@@ -493,18 +609,17 @@ export class ExtensionServer extends EventEmitter {
     }
 
     const token = url.searchParams.get('token') || String(req.headers['x-idms-token'] || '')
-    let tokenAuthed = false
-    if (token) {
-      if (!safeEqual(token, this.token) || (origin && !this.allowedOrigins.has(origin))) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
-        socket.destroy()
-        return
-      }
-      tokenAuthed = true
+    // Token zorunlu: eşleştirme yalnızca /pair üzerinden yapılır. Token'sız
+    // bağlantı kabul edilirse yereldeki herhangi bir süreç/eklenti kodu alıp
+    // köprüyü ele geçirebilirdi.
+    if (!token || !safeEqual(token, this.token) || (origin && !this.allowedOrigins.has(origin))) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      return
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      this.onConnection(ws, req, tokenAuthed, url)
+      this.onConnection(ws, req, true, url)
     })
   }
 
@@ -526,8 +641,14 @@ export class ExtensionServer extends EventEmitter {
     this.send(client, {
       t: 'welcome',
       appVersion: this.appVersion(),
-      paired: tokenAuthed,
-      pairingCode: tokenAuthed ? undefined : cfg.pairingCode
+      paired: tokenAuthed
+      // Eşleştirme kodu buradan ASLA gönderilmez: token'sız istemci zaten
+      // bağlanamaz, token'lı istemcinin koda ihtiyacı yoktur.
+    })
+    this.send(client, {
+      t: 'config',
+      floatingPanel: cfg.floatingPanel !== false,
+      enabled: cfg.enabled
     })
 
     ws.on('message', (raw) => {
@@ -543,10 +664,6 @@ export class ExtensionServer extends EventEmitter {
 
     ws.on('close', () => {
       this.clients.delete(id)
-      if (this.floatClientId === id) {
-        this.floatClientId = ''
-        this.emit('float-media', { state: 'hide', key: '' })
-      }
       this.emit('client-left', client.client)
       this.emitStatus()
     })
@@ -563,62 +680,64 @@ export class ExtensionServer extends EventEmitter {
   // Mesaj işleme
   // -------------------------------------------------------------------------
 
+  /** Yüzen panel yalnızca eşleşmiş bir tarayıcı eklentisinden kabul edilir. */
+  private canUseFloat(client: Client): boolean {
+    if (!this.float || !client.paired) return false
+    return EXTENSION_SCHEMES.some((scheme) => client.origin.startsWith(scheme))
+  }
+
   private async handleMessage(client: Client, msg: ExtToAppMessage): Promise<void> {
     if (!msg || typeof msg.t !== 'string') return
 
-    // Yüzen panel yalnızca eşleşmiş (kod veya token) bağlantılardan kabul edilir.
-    if (msg.t === 'float') {
-      const fromExtension =
-        client.origin.startsWith('chrome-extension://') ||
-        client.origin.startsWith('moz-extension://')
-      if (!fromExtension) {
+    // Sayfa içi panelin istekleri: kalite listesi, indirme ve eylemler.
+    if (msg.t === 'float-formats' || msg.t === 'float-download' || msg.t === 'float-action') {
+      if (!this.canUseFloat(client)) {
         this.send(client, { t: 'ack', ok: false, message: 'yetkisiz köken' })
         return
       }
-      if (!client.paired) {
-        this.send(client, { t: 'ack', ok: false, message: 'eşleştirme gerekli' })
+      const key = typeof msg.key === 'string' ? msg.key.slice(0, 2000) : undefined
+      const media = sanitizeFloatMedia((msg as any).media)
+      if (!media) {
+        this.send(client, {
+          t: msg.t === 'float-download' ? 'float-download' : 'float-formats',
+          reqId: (msg as any).reqId,
+          ok: false,
+          message: 'geçersiz medya'
+        } as AppToExtMessage)
         return
       }
-      this.floatClientId = client.id
-      const media = msg.media
-      const rect = msg.rect
-      const sources = Array.isArray((media as any)?.sources)
-        ? ((media as any).sources as any[])
-            .slice(0, 8)
-            .map((s) => ({
-              url: String(s?.url || '').slice(0, 2048),
-              mime: s?.mime ? String(s.mime).slice(0, 80) : undefined,
-              label: s?.label ? String(s.label).slice(0, 40) : undefined
-            }))
-            .filter((s) => /^https?:\/\//i.test(s.url))
-        : []
-      this.emit('float-media', {
-        state: msg.state,
-        key: String(msg.key || (media && media.url) || '').slice(0, 2048),
-        media:
-          media && typeof media.url === 'string'
-            ? {
-                url: String(media.url).slice(0, 2048),
-                pageUrl: String(media.pageUrl || '').slice(0, 2048),
-                title: String(media.title || '').slice(0, 300),
-                pageTitle: String(media.pageTitle || '').slice(0, 300),
-                kind: media.kind === 'audio' ? 'audio' : 'video',
-                duration: typeof media.duration === 'number' ? media.duration : null,
-                direct: media.direct === true,
-                needsExtractor: media.needsExtractor === true,
-                sources: sources.length ? sources : undefined
-              }
-            : undefined,
-        rect:
-          rect && [rect.x, rect.y, rect.width, rect.height].every((n) => typeof n === 'number')
-            ? {
-                x: rect.x,
-                y: rect.y,
-                width: rect.width,
-                height: rect.height
-              }
-            : undefined
-      })
+      try {
+        if (msg.t === 'float-formats') {
+          const res = await this.float!.formats(media, key)
+          this.send(client, { t: 'float-formats', reqId: msg.reqId, ...res })
+          return
+        }
+        if (msg.t === 'float-download') {
+          const kind = msg.kind === 'audio' ? 'audio' : 'video'
+          const res = await this.float!.download(media, kind, msg.formatId, key)
+          this.send(client, { t: 'float-download', reqId: msg.reqId, ...res })
+          return
+        }
+        if (msg.action === 'open-app') this.float!.showMainWindow()
+        else if (msg.action === 'formats') this.float!.openFormats(media)
+        this.send(client, { t: 'ack', ok: true, ref: 'float-action' })
+      } catch (err: any) {
+        const message = String(err?.message || err)
+        if (msg.t === 'float-formats') {
+          this.send(client, {
+            t: 'float-formats',
+            reqId: msg.reqId,
+            ok: false,
+            formats: [],
+            note: message,
+            language: this.float?.language ?? 'tr'
+          })
+        } else if (msg.t === 'float-download') {
+          this.send(client, { t: 'float-download', reqId: msg.reqId, ok: false, message })
+        } else {
+          this.send(client, { t: 'ack', ok: false, message })
+        }
+      }
       return
     }
 
@@ -632,29 +751,21 @@ export class ExtensionServer extends EventEmitter {
       case 'hello': {
         client.client = String(msg.client || 'extension').slice(0, 40)
         client.version = String(msg.version || '').slice(0, 20)
-        const cfg = this.store.getSettings().extension
-        const codeOk =
-          typeof msg.pairingCode === 'string' &&
-          msg.pairingCode.toUpperCase() === cfg.pairingCode.toUpperCase()
-        if (codeOk) {
-          client.paired = true
-          this.send(client, {
-            t: 'welcome',
-            appVersion: this.appVersion(),
-            paired: true
-          })
-          this.emit('paired', { origin: client.origin, name: client.client })
-          this.emitStatus()
-          this.sendStatusTo(client)
-        } else {
-          this.send(client, {
-            t: 'welcome',
-            appVersion: this.appVersion(),
-            paired: false,
-            pairingCode: cfg.pairingCode
-          })
-          this.send(client, { t: 'ack', ok: false, message: 'eşleştirme kodu hatalı' })
+        // Kod yalnızca /pair ile doğrulanır; WS üzerinden kod denemesi yoktur
+        // (sınırsız deneme ve kod sızıntısı riski).
+        if (!client.paired) {
+          this.send(client, { t: 'welcome', appVersion: this.appVersion(), paired: false })
+          this.send(client, { t: 'ack', ok: false, message: 'eşleştirme gerekli' })
+          break
         }
+        this.send(client, {
+          t: 'welcome',
+          appVersion: this.appVersion(),
+          paired: true
+        })
+        this.emit('paired', { origin: client.origin, name: client.client })
+        this.emitStatus()
+        this.sendStatusTo(client)
         break
       }
 
@@ -685,12 +796,37 @@ export class ExtensionServer extends EventEmitter {
           break
         }
         try {
-          const item = await this.manager.add({
+          // Eklentinin gönderdiği oturum çerezleri (giriş gerektiren dosyalar)
+          const cookie = (Array.isArray(msg.cookies) ? msg.cookies : [])
+            .filter((c: any) => c && typeof c.name === 'string' && typeof c.value === 'string')
+            .map((c: any) => `${String(c.name).replace(/[;\r\n]/g, '')}=${String(c.value).replace(/[\r\n]/g, '')}`)
+            .join('; ')
+          const headers: Record<string, string> = {}
+          if (cookie) headers.Cookie = cookie
+          const referrer = String(msg.referrer || msg.pageUrl || '')
+          if (/^https?:\/\//i.test(referrer)) headers.Referer = referrer
+
+          const req = {
             url,
             pageUrl: msg.pageUrl,
             name: msg.name,
-            silent: false // onay ayarı yöneticide uygulanır
-          })
+            silent: false, // onay ayarı yöneticide uygulanır
+            headers
+          }
+          const item = this.requestDownload
+            ? await this.requestDownload(req)
+            : await this.manager.add(req)
+          // ÖNEMLİ: onay penceresi açıldığında / kullanıcı vazgeçtiğinde item
+          // yoktur. Eklenti yalnızca gerçekten kuyruğa eklenmişse tarayıcı
+          // indirmesini iptal eder; aksi hâlde dosya kaybolurdu.
+          if (!item || !item.id) {
+            this.send(client, {
+              t: 'ack',
+              ok: false,
+              message: 'IDMS indirmeyi başlatmadı (onay bekleniyor / iptal edildi)'
+            })
+            break
+          }
           this.send(client, { t: 'ack', ok: true, id: item.id })
           this.emit('download-requested', { url, name: msg.name })
         } catch (err: any) {
@@ -705,13 +841,40 @@ export class ExtensionServer extends EventEmitter {
           this.send(client, { t: 'ack', ok: false, message: 'geçersiz URL' })
           break
         }
-        this.emit('media-download-requested', {
+        const payload = {
           url,
           pageUrl: msg.pageUrl,
           quality: msg.quality,
           cookies: msg.cookies
-        })
-        this.send(client, { t: 'ack', ok: true, ref: 'download-media' })
+        }
+        try {
+          if (this.requestMediaDownload) {
+            const item = await this.requestMediaDownload(payload)
+            if (!item || !item.id) {
+              this.send(client, {
+                t: 'ack',
+                ok: false,
+                message: 'Medya indirmesi başlatılamadı (yt-dlp kurulu mu?)'
+              })
+              break
+            }
+            this.send(client, { t: 'ack', ok: true, id: item.id, ref: 'download-media' })
+          } else {
+            this.emit('media-download-requested', payload)
+            this.send(client, { t: 'ack', ok: true, ref: 'download-media' })
+          }
+        } catch (err: any) {
+          this.send(client, { t: 'ack', ok: false, message: String(err?.message || err) })
+        }
+        break
+      }
+
+      case 'unpair': {
+        this.allowedOrigins.delete(client.origin)
+        this.store.patchSettings({ extension: { allowedOrigins: [...this.allowedOrigins] } })
+        client.paired = false
+        this.emitStatus()
+        this.send(client, { t: 'ack', ok: true, ref: 'unpair' })
         break
       }
 
@@ -726,7 +889,7 @@ export class ExtensionServer extends EventEmitter {
   }
 
   private appVersion(): string {
-    return process.env.npm_package_version || '1.0.0'
+    return this.version
   }
 
   send(client: Client, msg: AppToExtMessage): void {
@@ -783,6 +946,16 @@ export class ExtensionServer extends EventEmitter {
     this.broadcast({ t: 'toast', title, message, stage })
   }
 
+  /** Panel ayarı değişti: içerik betikleri rozeti hemen gizlesin/göstersin. */
+  broadcastConfig(): void {
+    const cfg = this.store.getSettings().extension
+    this.broadcast({
+      t: 'config',
+      floatingPanel: cfg.floatingPanel !== false,
+      enabled: cfg.enabled
+    })
+  }
+
   private emitStatus(): void {
     this.emit('status', this.status)
   }
@@ -796,7 +969,6 @@ export class ExtensionServer extends EventEmitter {
       }
     }
     this.clients.clear()
-    this.floatClientId = ''
     try {
       this.wss?.close()
     } catch {

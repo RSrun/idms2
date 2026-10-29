@@ -86,6 +86,9 @@ function render(state) {
     setHint('IDMS → Ayarlar → Tarayıcı bölümünden entegrasyonu açın.')
   } else if (!paired) {
     setHint('Eşleştirme kodu IDMS ayarlarında görünür.')
+  } else if (STATE.lastError) {
+    // Son yakalama hatası: tarayıcı indirmeleri devralınamadı.
+    setHint(`Son hata: ${STATE.lastError}`, 'err')
   } else {
     setHint('IDMS hazır. Sağ tık menüsü ve yüzen panel etkin.')
   }

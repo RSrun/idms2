@@ -74,7 +74,7 @@
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.5);
   --shadow-3: 0 12px 48px rgba(0, 0, 0, 0.6);
-  --scroll-thumb: #3a4254;
+  --scroll-thumb: #5c6a82;
 }
 
 * {
@@ -840,6 +840,26 @@ tr:hover .row-actions, tr.selected .row-actions {
   animation: pop 0.16s cubic-bezier(0.2, 0.9, 0.3, 1.2);
 }
 .dialog.wide { width: min(760px, calc(100vw - 48px)); }
+
+/* Medya penceresi: biçim listesi kendi içinde kayar, alt/üst alanlar sabit kalır */
+.dialog.media { max-height: calc(100vh - 12px); }
+.dialog.media .d-body {
+  min-height: 0;
+  overflow: hidden;
+  gap: 10px;
+  padding: 12px 14px;
+}
+.dialog.media .media-head,
+.dialog.media .seg,
+.dialog.media .setting-row {
+  flex: 0 0 auto;
+}
+.dialog.media .setting-row {
+  padding: 8px 0;
+}
+.dialog.media .d-foot {
+  padding: 10px 16px;
+}
 @keyframes pop {
   from { opacity: 0; transform: translateY(8px) scale(0.985); }
   to { opacity: 1; transform: none; }
@@ -979,10 +999,35 @@ tr:hover .row-actions, tr.selected .row-actions {
 
 /* Format table (media dialog) */
 .ftable {
+  flex: 1 1 auto;
+  min-height: 132px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  background: var(--panel);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 }
+
+/* Sağdaki kaydırma çubuğu: koyu temada da belirgin olsun diye
+   kanal (track) ve tutamak (thumb) ayrı renklendirilir. */
+.ftable::-webkit-scrollbar {
+  width: 12px;
+}
+.ftable::-webkit-scrollbar-track {
+  background: var(--panel-2);
+  border-left: 1px solid var(--border);
+}
+.ftable::-webkit-scrollbar-thumb {
+  min-height: 36px;
+  background: var(--scroll-thumb);
+  border: 2px solid var(--panel-2);
+  border-radius: 6px;
+}
+.ftable::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
+}
+
 .ftable .frow {
   display: grid;
   grid-template-columns: 26px 1fr 90px 90px 70px;
@@ -997,7 +1042,11 @@ tr:hover .row-actions, tr.selected .row-actions {
 .ftable .frow:hover { background: var(--row-hover); }
 .ftable .frow.sel { background: var(--row-selected); }
 .ftable .fhead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;

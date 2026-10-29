@@ -40,10 +40,16 @@ export function MediaDialog({ url, pageUrl, initialTitle, onClose, onDownloaded 
         if (!res.ok) {
           setError(res.error || t('err.ytdlpMissing'))
         } else {
-          // Varsayılanlar: en iyi video, en iyi ses
-          const video = res.formats.find((f) => !f.isAudioOnly && f.vcodec?.includes('vp9'))
-            || res.formats.find((f) => !f.isAudioOnly)
-          const audio = res.formats.find((f) => f.isAudioOnly)
+          // Varsayılanlar: en iyi video, en iyi ses.
+          // HLS (m3u8) kopyaları atlanır: ayrı ses akışıyla birleştirilemiyorlar;
+          // eşdeğer DASH biçimi varsa o seçilir.
+          const video =
+            res.formats.find((f) => !f.isAudioOnly && !f.hls && f.vcodec?.includes('vp9')) ||
+            res.formats.find((f) => !f.isAudioOnly && !f.hls) ||
+            res.formats.find((f) => !f.isAudioOnly)
+          const audio =
+            res.formats.find((f) => f.isAudioOnly && !f.hls) ||
+            res.formats.find((f) => f.isAudioOnly)
           setSelectedFormat(video?.formatId ?? null)
           setAudioFormat(audio?.formatId ?? null)
         }
@@ -59,14 +65,22 @@ export function MediaDialog({ url, pageUrl, initialTitle, onClose, onDownloaded 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url])
 
-  const videoFormats = useMemo(
-    () => (probe?.formats || []).filter((f) => !f.isAudioOnly),
-    [probe]
-  )
-  const audioFormats = useMemo(
-    () => (probe?.formats || []).filter((f) => f.isAudioOnly),
-    [probe]
-  )
+  // HLS (m3u8) kopyaları ayrı ses akışıyla birleştirilemiyor ve boyutları
+  // bilinmiyor; eşdeğer DASH (https) biçimi varsa listede gösterilmez.
+  // Yalnızca HLS varsa (canlı yayın) hepsi listelenir.
+  const visible = useMemo(() => {
+    const all = probe?.formats || []
+    const videos = all.filter((f) => !f.isAudioOnly)
+    const audios = all.filter((f) => f.isAudioOnly)
+    const dashVideos = videos.filter((f) => !f.hls)
+    const dashAudios = audios.filter((f) => !f.hls)
+    return {
+      video: dashVideos.length > 0 ? dashVideos : videos,
+      audio: dashAudios.length > 0 ? dashAudios : audios
+    }
+  }, [probe])
+  const videoFormats = visible.video
+  const audioFormats = visible.audio
 
   async function start(): Promise<void> {
     try {
@@ -85,7 +99,7 @@ export function MediaDialog({ url, pageUrl, initialTitle, onClose, onDownloaded 
 
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog wide" role="dialog" aria-label={t('media.title')}>
+      <div className="dialog wide media" role="dialog" aria-label={t('media.title')}>
         <div className="d-head">
           <span className="brand-mark" style={{ width: 30, height: 30, fontSize: 17 }}>
             🎬
@@ -169,12 +183,6 @@ export function MediaDialog({ url, pageUrl, initialTitle, onClose, onDownloaded 
                   audioOnly
                 />
               )}
-
-              {tab === 'video' && !probe.formats.some((f) => !f.isAudioOnly) && (
-                <div className="muted" style={{ fontSize: 12 }}>
-                  {t('media.noFormats')}
-                </div>
-              )}
             </>
           )}
 
@@ -196,7 +204,9 @@ export function MediaDialog({ url, pageUrl, initialTitle, onClose, onDownloaded 
 
         <div className="d-foot">
           <span className="grow muted" style={{ fontSize: 11.5 }}>
-            {probe?.ok ? `${probe.formats.length} ${t('media.formats').toLowerCase()}` : ''}
+            {probe?.ok
+              ? `${videoFormats.length + audioFormats.length} ${t('media.formats').toLowerCase()}`
+              : ''}
           </span>
           <button className="btn" onClick={onClose}>
             {t('common.cancel')}

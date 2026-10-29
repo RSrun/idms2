@@ -9,7 +9,6 @@ import { DownloadList } from './components/DownloadList'
 import { StatusBar } from './components/StatusBar'
 import { ToastStack } from './components/ToastStack'
 import { NotificationPanel } from './components/NotificationPanel'
-import { AddDownloadDialog } from './dialogs/AddDownloadDialog'
 import { ConfirmDownloadDialog } from './dialogs/ConfirmDownloadDialog'
 import { MediaDialog } from './dialogs/MediaDialog'
 import { TorrentDialog } from './dialogs/TorrentDialog'
@@ -19,7 +18,6 @@ const api = () => window.idms2
 
 export type DialogKind =
   | { kind: 'none' }
-  | { kind: 'add'; initialUrl?: string }
   | { kind: 'media'; url: string; pageUrl?: string; title?: string }
   | { kind: 'torrent' }
   | { kind: 'settings'; tab?: string }
@@ -94,7 +92,7 @@ export default function App() {
       if (!text) return
       const url = text.split(/\r?\n/)[0].trim()
       if (/^https?:\/\//i.test(url)) {
-        setDialog({ kind: 'add', initialUrl: url })
+        void api().openAddDownloadWindow(url)
       }
     }
     window.addEventListener('dragover', over)
@@ -119,7 +117,7 @@ export default function App() {
         setNotifOpen(false)
       } else if (e.ctrlKey && e.key.toLowerCase() === 'j') {
         e.preventDefault()
-        setDialog({ kind: 'add' })
+        void api().openAddDownloadWindow()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -178,7 +176,7 @@ export default function App() {
       <Toolbar
         selected={selectedItems}
         unreadCount={st.toasts.length}
-        onAdd={() => setDialog({ kind: 'add' })}
+        onAdd={() => void api().openAddDownloadWindow()}
         onTorrent={() => setDialog({ kind: 'torrent' })}
         onSettings={() => setDialog({ kind: 'settings' })}
         onToggleNotifications={() => setNotifOpen((v) => !v)}
@@ -276,14 +274,6 @@ export default function App() {
       )}
 
       {/* Diyaloglar */}
-      {dialog.kind === 'add' && (
-        <AddDownloadDialog
-          initialUrl={dialog.initialUrl}
-          onClose={() => setDialog({ kind: 'none' })}
-          onAdded={(id) => setSelected(id)}
-        />
-      )}
-
       {dialog.kind === 'media' && (
         <MediaDialog
           url={dialog.url}

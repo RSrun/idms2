@@ -4,6 +4,7 @@ import { existsSync, promises as fsp } from 'fs'
 import { join, delimiter } from 'path'
 import { homedir } from 'os'
 import type { MediaFormat, MediaProbeResult, Settings } from '@shared/types'
+import { probeUrl } from './engine/probe'
 
 /**
  * yt-dlp (ve ffmpeg) ile sosyal medya indirme alt sistemi.
@@ -14,11 +15,45 @@ import type { MediaFormat, MediaProbeResult, Settings } from '@shared/types'
  * - İlerleme: `--newline` çıktısı satır satır ayrılır
  */
 
+/**
+ * Çerez dosyası verilmediğinde yt-dlp'nin çerezleri doğrudan tarayıcıdan
+ * alması için kullanılacak tarayıcı. Windows'ta Edge yaygın olduğu için ilk
+ * sırada denenir; profil klasörüne göre Chrome/Brave/Firefox'a düşülür.
+ */
+function cookiesBrowser(): string | undefined {
+  const home = homedir()
+  const local = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local')
+  // Tarayıcı açıkken çerez veritabanı kilitlidir; yt-dlp kopyalayamaz
+  // ("Could not copy Chrome cookie database"). Bu durumda tarayıcıdan çerez
+  // almayı denemeyiz; eklenti zaten sayfa çerezlerini ayrıca gönderir.
+  const open = (userData: string): boolean => existsSync(join(userData, 'lockfile'))
+  if (process.platform === 'win32') {
+    const edge = join(local, 'Microsoft', 'Edge', 'User Data')
+    if (existsSync(edge)) return open(edge) ? undefined : 'edge'
+    const chrome = join(local, 'Google', 'Chrome', 'User Data')
+    if (existsSync(chrome)) return open(chrome) ? undefined : 'chrome'
+    const brave = join(local, 'BraveSoftware', 'Brave-Browser', 'User Data')
+    if (existsSync(brave)) return open(brave) ? undefined : 'brave'
+    if (existsSync(join(local, 'Mozilla', 'Firefox', 'Profiles'))) return 'firefox'
+  } else if (process.platform === 'darwin') {
+    if (existsSync(join(home, 'Library', 'Application Support', 'Microsoft Edge'))) return 'edge'
+    if (existsSync(join(home, 'Library', 'Application Support', 'Google', 'Chrome'))) return 'chrome'
+    if (existsSync(join(home, 'Library', 'Application Support', 'Firefox'))) return 'firefox'
+  } else {
+    if (existsSync(join(home, '.config', 'microsoft-edge'))) return 'edge'
+    if (existsSync(join(home, '.config', 'google-chrome'))) return 'chrome'
+    if (existsSync(join(home, '.mozilla', 'firefox'))) return 'firefox'
+  }
+  return undefined
+}
+
 export interface YtdlpProgress {
   percent: number
   speed: number
   etaSeconds: number | null
   statusLine: string
+  /** yt-dlp çıktısındaki akış boyutu (bilinmiyorsa null) */
+  totalBytes?: number | null
 }
 
 export interface YtdlpOptions {
@@ -31,6 +66,8 @@ export interface YtdlpOptions {
   ffmpegPath?: string
   ytdlpPath?: string
   filenameTemplate?: string
+  /** Var olan parça dosyalarını yok sayıp baştan indir (hatalı denemeden sonra) */
+  forceOverwrite?: boolean
 }
 
 export interface RunOptions {
@@ -44,8 +81,39 @@ const BASE_ARGS = [
   '--no-warnings',
   '--no-playlist',
   '--newline',
-  '--progress'
+  '--progress',
+  // Windows'ta yt-dlp boruya sistem kod sayfasıyla (ör. cp1254) yazıyor;
+  // UTF-8 zorlanmazsa Türkçe dosya adları bozulur ve yol eşleşmez.
+  '--encoding',
+  'utf-8'
 ]
+
+/**
+ * yt-dlp çıktısındaki olası ürün yolları. Birleştirme (`Merger`) ve ses
+ * çıkarma (`ExtractAudio`) satırları, indirilen parçaların yerine geçer;
+ * parçalar işlem sonunda silinir.
+ */
+const OUTPUT_PATH_PATTERNS = [
+  /\[Merger\] Merging formats into "(.+)"\s*$/,
+  /\[ExtractAudio\] Destination:\s*(.+)$/,
+  /\[ffmpeg\] Destination:\s*(.+)$/,
+  /\[FixupM3u8\] Fixing MPEG-TS in MP4 container of "(.+)"\s*$/,
+  /\[download\] Destination:\s*(.+)$/,
+  /\[download\]\s+(.+?) has already been downloaded/
+]
+
+/**
+ * yt-dlp'nin bildirdiği yollardan diskte duran **en son** olanı seçer.
+ * Birleştirme (`Merger`) sonrası parça dosyaları silindiği için son geçerli
+ * satır bir parça adı olabilir; bu yüzden var olan dosya aranır. Hiçbiri
+ * yoksa son bildirilen yol (amaçlanan ad) döner.
+ */
+export function pickExistingOutput(paths: string[], fallback = ''): string {
+  for (let i = paths.length - 1; i >= 0; i--) {
+    if (paths[i] && existsSync(paths[i])) return paths[i]
+  }
+  return paths[paths.length - 1] || fallback
+}
 
 /** yt-dlp ve ffmpeg binary'lerinin yerini bulur. */
 export class ToolLocator extends EventEmitter {
@@ -185,11 +253,17 @@ export class YtdlpRunner extends EventEmitter {
     return env
   }
 
-  private async baseArgs(extra: string[], cookieFile?: string, ffmpegPath?: string): Promise<string[]> {
+  private async baseArgs(
+    extra: string[],
+    cookieFile?: string,
+    ffmpegPath?: string,
+    cookiesFromBrowser?: string
+  ): Promise<string[]> {
     const args = [...BASE_ARGS]
     const ff = ffmpegPath || this.locator.findFfmpeg()
     if (ff) args.push('--ffmpeg-location', ff)
     if (cookieFile) args.push('--cookies', cookieFile)
+    else if (cookiesFromBrowser) args.push('--cookies-from-browser', cookiesFromBrowser)
     if (this.locator.findYtdlp()?.toLowerCase().includes('youtube-dl')) {
       // youtube-dl geri uyumluluk: bazı bayraklar yok
       return [...extra]
@@ -208,8 +282,16 @@ export class YtdlpRunner extends EventEmitter {
     if (!bin) throw this.locator.missingYtdlpError()
 
     let cookieFile: string | undefined
-    if (opts.useCookies && opts.cookies && opts.cookies.length > 0) {
-      cookieFile = await writeCookieFile(opts.cookies, this.tmpDir)
+    let browser: string | undefined
+    if (opts.useCookies) {
+      if (opts.cookies && opts.cookies.length > 0) {
+        cookieFile = await writeCookieFile(opts.cookies, this.tmpDir)
+      } else {
+        // Eklenti çerez göndermediyse (uygulamaya yapıştırılan adres) yt-dlp
+        // doğrudan tarayıcı profilinden çerez alsın: Reddit/Instagram gibi
+        // oturum isteyen sitelerde "authentication required" hatasını önler.
+        browser = cookiesBrowser()
+      }
     }
 
     const extra = ['-J', opts.url]
@@ -217,12 +299,27 @@ export class YtdlpRunner extends EventEmitter {
       // yt-dlp modern sürümlerde --impersonate izni gerektirir; curl_cffi yoksa yoksay
       extra.splice(0, 0, '--no-check-certificate')
     }
-    const args = await this.baseArgs(extra, cookieFile)
+    const args = await this.baseArgs(extra, cookieFile, undefined, browser)
 
     try {
       const stdout = await this.runRaw(bin, args, 90000)
       const info = JSON.parse(stdout)
-      return normalizeProbe(info, opts.url)
+      const result = normalizeProbe(info, opts.url)
+
+      // yt-dlp bazı sitelerde (ve doğrudan dosyalarda) boyut bildirmez;
+      // seçim tablosunda "—" kalmasın diye kalanlar HEAD ile tamamlanır.
+      // Boyut sorgusu başarısız olsa bile biçim listesi dönmeli.
+      const urls = new Map<string, string>()
+      for (const f of Array.isArray(info.formats) ? info.formats : []) {
+        if (f?.format_id && typeof f.url === 'string') urls.set(String(f.format_id), f.url)
+      }
+      try {
+        await fillMissingFormatSizes(result.formats, urls, result.pageUrl || opts.url)
+      } catch {
+        /* boyutlar eksik kalsa da liste kullanılabilir */
+      }
+
+      return result
     } catch (e: any) {
       return {
         ok: false,
@@ -253,11 +350,17 @@ export class YtdlpRunner extends EventEmitter {
     await fsp.mkdir(opts.saveDir, { recursive: true })
 
     let cookieFile: string | undefined
-    if (opts.useCookies && opts.cookies && opts.cookies.length > 0) {
-      cookieFile = await writeCookieFile(opts.cookies, this.tmpDir)
+    let browser: string | undefined
+    if (opts.useCookies) {
+      if (opts.cookies && opts.cookies.length > 0) {
+        cookieFile = await writeCookieFile(opts.cookies, this.tmpDir)
+      } else {
+        browser = cookiesBrowser()
+      }
     }
 
     const quality = opts.quality || 'best'
+    const ffmpeg = opts.ffmpegPath || this.locator.findFfmpeg()
     const extra: string[] = ['-o', join(opts.saveDir, opts.filenameTemplate || '%(title)s.%(ext)s')]
 
     if (quality === 'audio') {
@@ -274,15 +377,28 @@ export class YtdlpRunner extends EventEmitter {
       extra.push('-f', 'bestvideo*+bestaudio/best')
     }
 
+    // HLS (m3u8) video ayrı ses akışıyla birleştirilirken yt-dlp'nin yerel
+    // indiricisi zaman damgasız MPEG-TS parçalarını .mp4 içine yazıyor; ffmpeg
+    // birleştirmesi "Conversion failed!" ile bitiyor (yt-dlp fixup'ı birleştirme
+    // girdilerinde çalışmıyor). FFmpeg indiricisi geçerli bir dosya üretir.
+    if (quality !== 'audio' && ffmpeg) extra.push('--downloader', 'm3u8:ffmpeg')
+
+    // Hatalı bir denemeden kalan bozuk parçalar (ör. zaman damgasız .fNNN.mp4)
+    // yeniden denenirken kullanılmasın; hepsi baştan indirilsin.
+    if (opts.forceOverwrite) extra.push('--force-overwrites')
+
     if (opts.pageUrl) extra.push('--referer', opts.pageUrl)
     if (opts.impersonate) extra.push('--no-check-certificate')
 
-    const args = await this.baseArgs(extra, cookieFile, opts.ffmpegPath)
+    const args = await this.baseArgs(extra, cookieFile, opts.ffmpegPath, browser)
     args.push(opts.url)
     const env = await this.buildEnv()
 
     const lines: string[] = []
-    let lastName = ''
+    /** yt-dlp'nin bildirdiği çıktı yolları (en son geçerli olan seçilir) */
+    const outputPaths: string[] = []
+    /** Son görülen akış boyutu: "[download] 12.3% of 42.76MiB …" */
+    let streamBytes: number | null = null
 
     await this.runStream(bin, args, {
       signal,
@@ -290,6 +406,12 @@ export class YtdlpRunner extends EventEmitter {
       onLine: (line) => {
         lines.push(line)
         cb.onOutput?.(line)
+
+        const sizeMatch = /\[download\].*?\bof\s+~?\s*([\d.]+)\s*([KMG])i?B/.exec(line)
+        if (sizeMatch) {
+          const parsed = parseSize(sizeMatch[1], sizeMatch[2])
+          if (parsed > 0) streamBytes = parsed
+        }
 
         const dlMatch = /\[download\]\s+([\d.]+)%/.exec(line)
         if (dlMatch) {
@@ -300,24 +422,42 @@ export class YtdlpRunner extends EventEmitter {
             percent: isFinite(percent) ? Math.min(1, Math.max(0, percent)) : 0,
             speed: speedMatch ? parseSpeed(speedMatch[1]) : 0,
             etaSeconds: etaMatch ? parseEta(etaMatch[1]) : null,
+            totalBytes: streamBytes,
             statusLine: line.replace(/^\[download\]\s+/, '').trim()
           })
         } else if (line.startsWith('[Merger]') || line.startsWith('[ffmpeg]')) {
-          cb.onProgress?.({ percent: 0.98, speed: 0, etaSeconds: null, statusLine: line })
+          cb.onProgress?.({
+            percent: 0.98,
+            speed: 0,
+            etaSeconds: null,
+            totalBytes: streamBytes,
+            statusLine: line
+          })
         } else if (line.startsWith('[ExtractAudio]')) {
-          cb.onProgress?.({ percent: 0.99, speed: 0, etaSeconds: null, statusLine: line })
+          cb.onProgress?.({
+            percent: 0.99,
+            speed: 0,
+            etaSeconds: null,
+            totalBytes: streamBytes,
+            statusLine: line
+          })
         }
 
-        const destMatch = /\[download\] Destination:\s*(.+)$/.exec(line)
-        if (destMatch) lastName = destMatch[1].trim()
-        const already = /\[download\]\s+(.+?) has already been downloaded/.exec(line)
-        if (already) lastName = already[1].trim()
+        for (const re of OUTPUT_PATH_PATTERNS) {
+          const m = re.exec(line)
+          if (m) {
+            outputPaths.push(m[1].trim())
+            break
+          }
+        }
       }
     })
 
     if (cookieFile) fsp.unlink(cookieFile).catch(() => undefined)
 
-    const filePath = lastName || opts.saveDir
+    // Parça dosyaları birleştirmeden sonra silinir; diskte duran en son yolu
+    // bildir. Hiçbiri yoksa son bilinen yola geri düş.
+    const filePath = pickExistingOutput(outputPaths, opts.saveDir)
     return { filePath, rawLines: lines }
   }
 
@@ -422,6 +562,8 @@ function normalizeProbe(info: any, pageUrl: string): MediaProbeResult {
     const vcodec = f.vcodec && f.vcodec !== 'none' ? f.vcodec : null
     const acodec = f.acodec && f.acodec !== 'none' ? f.acodec : null
     const isAudioOnly = !vcodec && !!acodec
+    const protocol = String(f.protocol || '')
+    const hls = /m3u8/i.test(protocol)
 
     // Anlamsız/jpegselleri ve çok küçük protokol parçalarını ele
     if (f.ext === 'mhtml' || f.ext === 'm3u8_native') continue
@@ -443,13 +585,17 @@ function normalizeProbe(info: any, pageUrl: string): MediaProbeResult {
       tbr: f.tbr ?? null,
       sizeBytes: f.filesize ?? f.filesize_approx ?? null,
       note: [f.format_note, f.protocol].filter(Boolean).join(' · '),
-      isAudioOnly
+      isAudioOnly,
+      protocol,
+      hls
     })
   }
 
-  // Sırala: önce ses-dışı kaliteye göre azalan, sonra ses-only
+  // Sırala: önce video, sonra ses; aynı grupta DASH (https) HLS'ten önce
+  // (HLS parçaları ayrı sesle birleştirilemiyor), sonra bit hızına göre azalan
   formats.sort((a, b) => {
     if (a.isAudioOnly !== b.isAudioOnly) return a.isAudioOnly ? 1 : -1
+    if (!!a.hls !== !!b.hls) return a.hls ? 1 : -1
     return (b.tbr || 0) - (a.tbr || 0)
   })
 
@@ -464,6 +610,45 @@ function normalizeProbe(info: any, pageUrl: string): MediaProbeResult {
   }
 }
 
+/**
+ * yt-dlp'nin boyut bildirmediği biçimler için HEAD isteğiyle `Content-Length`
+ * sorgular. HLS/DASH yayınlarında tek dosya boyutu olmadığından atlanır.
+ * Toplam süre bütçelidir; boyut bulunamazsa satır "—" olarak kalır.
+ */
+async function fillMissingFormatSizes(
+  formats: MediaFormat[],
+  urls: Map<string, string>,
+  pageUrl: string
+): Promise<void> {
+  const targets = formats.filter(
+    (f) => !f.hls && !(typeof f.sizeBytes === 'number' && f.sizeBytes > 0) && urls.has(f.formatId)
+  )
+  if (targets.length === 0) return
+
+  const deadline = Date.now() + 3000
+  const queue = [...targets]
+
+  const worker = async (): Promise<void> => {
+    for (let row = queue.shift(); row; row = queue.shift()) {
+      const left = deadline - Date.now()
+      if (left <= 0) return
+      try {
+        const probe = await probeUrl(urls.get(row.formatId) as string, {
+          pageUrl,
+          timeoutMs: Math.min(2000, left)
+        })
+        if (probe.ok && typeof probe.sizeBytes === 'number' && probe.sizeBytes > 0) {
+          row.sizeBytes = probe.sizeBytes
+        }
+      } catch {
+        /* boyut bilinmiyorsa satır boyutsuz kalır */
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => worker()))
+}
+
 function parseSpeed(s: string): number {
   const m = /^([\d.]+)([KMG]i?)?B\/s$/i.exec(s)
   if (!m) return 0
@@ -471,6 +656,15 @@ function parseSpeed(s: string): number {
   const unit = (m[2] || '').toUpperCase()
   const mult =
     unit.startsWith('K') ? 1024 : unit.startsWith('M') ? 1024 ** 2 : unit.startsWith('G') ? 1024 ** 3 : 1
+  return Math.round(v * mult)
+}
+
+/** yt-dlp ilerleme satırındaki "42.76MiB" benzeri boyutu bayta çevirir. */
+function parseSize(value: string, unit: string): number {
+  const v = parseFloat(value)
+  if (!isFinite(v)) return 0
+  const u = unit.toUpperCase()
+  const mult = u === 'K' ? 1024 : u === 'M' ? 1024 ** 2 : u === 'G' ? 1024 ** 3 : 1
   return Math.round(v * mult)
 }
 
@@ -492,6 +686,7 @@ export const SUPPORTED_SITES = [
   'X / Twitter',
   'Vimeo',
   'Twitch',
+  'Kick',
   'Dailymotion',
   'SoundCloud',
   'Pinterest',

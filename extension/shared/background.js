@@ -10,11 +10,12 @@ const api = typeof browser !== 'undefined' ? browser : chrome
  *  1. Tarayıcı indirmelerini devralmak (api.downloads.onCreated → iptal → IDMS)
  *  2. Ağ gözetleme (webRequest) ile indirilebilir içerikleri toplamak
  *  3. Sağ tık menüsü ("IDMS ile indir": bağlantı / medya / görsel / sayfa)
- *  4. Yüzen panel olaylarını uygulamaya iletmek
+ *  4. Sayfa içi yüzen panelin isteklerini (kalite listesi, indirme) uygulamaya
+ *     iletmek. Panel içerik betiğinde çizilir; burada yalnızca köprü vardır.
  *
  * Uygulama köprüsü: http://127.0.0.1:9789-9798
  *  - POST /pair {code} → token (yalnızca eklenti kökenine)
- *  - POST /rpc  (X-IDMS-Token) → indirme, medya, aç, float…
+ *  - POST /rpc  (X-IDMS-Token) → indirme, medya, aç, panel…
  *  - WS /?token=… → canlı durum/toast
  */
 
@@ -27,7 +28,11 @@ const DEFAULTS = {
   enabled: true,
   takeOver: true,
   autoDetect: true,
-  count: 0
+  /** Sayfada çizilen yüzen panel (uygulama ayarına göre güncellenir) */
+  floatingPanel: true,
+  count: 0,
+  /** Son yakalama hatası (popup'ta gösterilir) */
+  lastError: ''
 }
 
 const DOWNLOAD_EXTS = new Set([
@@ -40,7 +45,7 @@ const DOWNLOAD_EXTS = new Set([
 ])
 
 const EXTRACTOR_HOSTS =
-  /(^|\.)(youtube\.com|youtu\.be|instagram\.com|facebook\.com|fb\.watch|tiktok\.com|twitter\.com|x\.com|vimeo\.com|reddit\.com|dailymotion\.com|twitch\.tv)$/i
+  /(^|\.)(youtube\.com|youtu\.be|instagram\.com|facebook\.com|fb\.watch|tiktok\.com|twitter\.com|x\.com|vimeo\.com|reddit\.com|dailymotion\.com|twitch\.tv|soundcloud\.com|pinterest\.(?:com|co\.[a-z]{2}|[a-z]{2})|pin\.it|vk\.com|vkvideo\.ru|bilibili\.com|b23\.tv|kick\.com)$/i
 
 const MEDIA_TYPES =
   /^(video|audio)\/|mpegurl|dash\+xml|quicktime|matroska|ogg|mp4|webm/i
@@ -73,9 +78,9 @@ async function findApp(force = false) {
   // Popup her 3 sn'de durum sorar; uygulama kapalıyken 10 portu taramayalım.
   if (!force && Date.now() - lastFindAt < 4000) return lastFind
   const cfg = await cfgGet()
-  const order = force
-    ? APP_PORTS
-    : [cfg.port, ...APP_PORTS.filter((p) => p !== cfg.port)]
+  // Kayıtlı port her zaman önce denenir: kullanıcının farklı bir portta
+  // çalışan IDMS'i (ya da eşleşmiş kurulumu) varsa 9789'a düşmesin.
+  const order = [cfg.port, ...APP_PORTS.filter((p) => p !== cfg.port)]
   for (const port of order) {
     if (!port) continue
     try {
@@ -90,6 +95,10 @@ async function findApp(force = false) {
       lastFind = { port, info }
       lastFindAt = Date.now()
       if (cfg.port !== port) await cfgSet({ port })
+      // Panel ayarı uygulamada değişmiş olabilir; içerik betikleri
+      // storage.onChanged ile rozeti hemen gizler/gösterir.
+      const panel = info.floatingPanel !== false
+      if (cfg.floatingPanel !== panel) await cfgSet({ floatingPanel: panel })
       return lastFind
     } catch {
       /* sıradaki port */
@@ -125,7 +134,6 @@ async function pair(code) {
     paired: true,
     count: 0
   })
-  floatQueue.length = 0
   connectEvents()
   updateBadge()
   return data
@@ -210,13 +218,41 @@ function extensionOf(url) {
   }
 }
 
+/**
+ * Sayfanın oturum çerezleri (Reddit/Instagram gibi giriş isteyen siteler için).
+ * `cookies` izni gerekir; izin yoksa boş döner.
+ */
+async function cookiesFor(url) {
+  try {
+    if (!/^https?:/i.test(url || '')) return []
+    const list = await api.cookies.getAll({ url })
+    return (Array.isArray(list) ? list : []).slice(0, 80).map((c) => ({
+      name: String(c.name || ''),
+      value: String(c.value || ''),
+      domain: String(c.domain || ''),
+      path: String(c.path || '/'),
+      secure: c.secure === true,
+      httpOnly: c.httpOnly === true,
+      expirationDate: typeof c.expirationDate === 'number' ? c.expirationDate : undefined
+    }))
+  } catch {
+    return []
+  }
+}
+
 /** Bağlantı/medya/sayfa için doğru indirme yolunu seçer. */
 async function sendTarget({ url, pageUrl, media, name }) {
   if (!url) throw new Error('Adres yok')
   if (media || isExtractorUrl(url) || /^blob:|^data:/i.test(url)) {
     const target = /^https?:/i.test(url) ? url : pageUrl
     if (!/^https?:/i.test(target || '')) throw new Error('Bu medya adresi indirilemiyor')
-    return rpc('download-media', { url: target, pageUrl: pageUrl || target, quality: 'best' })
+    const cookies = await cookiesFor(pageUrl || target)
+    return rpc('download-media', {
+      url: target,
+      pageUrl: pageUrl || target,
+      quality: 'best',
+      cookies
+    })
   }
   return rpc('download', {
     url,
@@ -238,7 +274,6 @@ async function bumpCount(n) {
 
 let eventsWs = null
 let eventsRetry = null
-let floatQueue = []
 
 function connectEvents() {
   void (async () => {
@@ -267,13 +302,6 @@ function connectEvents() {
 
     sock.onopen = () => {
       clearTimeout(handshake)
-      while (floatQueue.length) {
-        try {
-          sock.send(JSON.stringify(floatQueue.shift()))
-        } catch {
-          break
-        }
-      }
     }
     sock.onmessage = (ev) => {
       let msg
@@ -288,6 +316,13 @@ function connectEvents() {
         broadcastToPopup({ type: 'status', status: msg })
       } else if (msg.t === 'toast') {
         broadcastToPopup({ type: 'toast', toast: msg })
+      } else if (msg.t === 'config') {
+        // Uygulama panel ayarını değiştirdi: içerik betiklerine storage üzerinden
+        // ulaşır (storage.onChanged).
+        cfgSet({
+          floatingPanel: msg.floatingPanel !== false,
+          enabled: msg.enabled !== false
+        })
       }
     }
     sock.onclose = (ev) => {
@@ -333,36 +368,122 @@ function closeEvents() {
   }
 }
 
-async function floatSend(message) {
-  const cfg = await cfgGet()
-  if (!cfg.enabled || !cfg.paired) return
-  const msg = {
-    t: 'float',
-    state: message.state,
-    key: message.key || '',
-    media: message.media,
-    rect: message.rect
+/** Adresin alan adı kökü (v.redd.it → redd.it) */
+function baseDomainOf(url) {
+  try {
+    return new URL(url).hostname.split('.').slice(-2).join('.')
+  } catch {
+    return ''
   }
-  if (eventsWs && eventsWs.readyState === WebSocket.OPEN) {
-    try {
-      eventsWs.send(JSON.stringify(msg))
-      return
-    } catch {
-      /* HTTP yedeğine düş */
-    }
+}
+
+function originOf(url) {
+  try {
+    return new URL(url).origin
+  } catch {
+    return ''
   }
-  if (msg.state !== 'hide') {
-    floatQueue.push(msg)
-    if (floatQueue.length > 4) floatQueue.splice(0, floatQueue.length - 4)
+}
+
+/**
+ * Sekmenin ağ gözetlemesinde görülen, bu videoya ait HLS/DASH adresi.
+ * Sayfa kayıtlarında manifest görünmediğinde (gölge DOM, işçi, önbellek)
+ * içerik betiğinin gönderdiği medya bu adresle tamamlanır.
+ */
+async function streamForTab(tabId, media, tabUrl) {
+  const items = (await loadDetected())[tabId] || []
+  const streams = items.filter((i) => i && i.kind === 'stream' && /^https?:/i.test(i.url || ''))
+  if (!streams.length) return ''
+  const hostKeys = new Set()
+  const addHost = (u) => {
+    const base = baseDomainOf(u)
+    if (base) hostKeys.add(base)
   }
-  // WS yoksa panel yine çalışsın: HTTP /rpc
-  rpc('float', {
-    state: msg.state,
-    key: msg.key,
-    media: msg.media,
-    rect: msg.rect
-  }).catch(() => {})
-  connectEvents()
+  addHost(media.pageUrl)
+  addHost(media.url)
+  addHost(tabUrl)
+  for (const s of media.sources || []) addHost(s.url)
+  const pageOrigin = originOf(media.pageUrl) || originOf(tabUrl)
+  // Liste yeniden eskiye sıralıdır: en son istenen manifest önce denenir.
+  for (const s of streams) {
+    if (pageOrigin && originOf(s.pageUrl) === pageOrigin) return s.url
+    if (hostKeys.has(baseDomainOf(s.url))) return s.url
+  }
+  return ''
+}
+
+/**
+ * İçerik betiğinden gelen medya bilgisini temizler ve oynatıcının ağdan
+ * aldığı HLS/DASH manifestini (varsa) ekler. Reddit gibi sitelerde oynatıcı
+ * tek bir <source> gösterir; kaliteler manifestte listelenir ve içerik betiği
+ * manifesti sayfa kayıtlarında bulamayabilir.
+ */
+async function floatMediaOf(raw, sender) {
+  if (!raw || typeof raw.url !== 'string') return null
+  const text = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '')
+  const media = {
+    url: text(raw.url, 2048),
+    pageUrl: text(raw.pageUrl, 2048),
+    title: text(raw.title, 300),
+    pageTitle: text(raw.pageTitle, 300),
+    kind: raw.kind === 'audio' ? 'audio' : 'video',
+    duration: typeof raw.duration === 'number' ? raw.duration : null,
+    direct: raw.direct === true,
+    needsExtractor: raw.needsExtractor === true,
+    sources: Array.isArray(raw.sources)
+      ? raw.sources
+          .slice(0, 8)
+          .filter((s) => s && typeof s.url === 'string')
+          .map((s) => ({
+            url: text(s.url, 2048),
+            mime: text(s.mime, 80) || undefined,
+            label: text(s.label, 40) || undefined
+          }))
+      : undefined,
+    manifest: text(raw.manifest, 2048) || undefined
+  }
+  // Giriş isteyen sitelerde (Reddit, Instagram…) kalite listesi ve indirme
+  // için oturum çerezleri gerekir; içerik betiği bunları okuyamaz.
+  const cookieUrl = media.pageUrl || media.url
+  if (/^https?:/i.test(cookieUrl)) {
+    const cookies = await cookiesFor(cookieUrl)
+    if (cookies.length) media.cookies = cookies
+  }
+  if (!media.manifest && sender?.tab?.id != null) {
+    const manifest = await streamForTab(sender.tab.id, media, sender.tab.url)
+    if (manifest) media.manifest = manifest
+  }
+  return media
+}
+
+/** /rpc yanıtındaki eşleşen yanıtı seçer (HTTP taşımasında replies dizisi gelir). */
+function replyOf(data, t) {
+  const list = data && Array.isArray(data.replies) ? data.replies : []
+  return list.find((r) => r && r.t === t) || null
+}
+
+/**
+ * Sayfa içi panelin uygulamaya sorduğu istek: kalite listesi, indirme ya da
+ * eylem. Uygulama yanıtı olduğu gibi içerik betiğine döner.
+ */
+async function floatRequest(msg, sender) {
+  const media = await floatMediaOf(msg.media, sender)
+  if (!media) return { ok: false, error: 'Medya bilgisi yok' }
+  const key = typeof msg.key === 'string' ? msg.key.slice(0, 2000) : ''
+  const data = await rpc(msg.type, {
+    key,
+    media,
+    kind: msg.kind === 'audio' ? 'audio' : 'video',
+    formatId: typeof msg.formatId === 'string' ? msg.formatId.slice(0, 80) : undefined,
+    action: msg.action === 'formats' ? 'formats' : undefined
+  })
+  const reply = replyOf(data, msg.type)
+  if (!reply) {
+    // Eylem istekleri (Formatlar… / IDMS'i aç) yalnızca ack ile yanıtlanır.
+    if (msg.type === 'float-action') return { ok: !!(data && data.ok) }
+    return { ok: false, error: data?.message || 'Uygulamadan yanıt gelmedi' }
+  }
+  return reply
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +603,46 @@ api.webRequest.onHeadersReceived.addListener(
 // ---------------------------------------------------------------------------
 
 const takingOver = new Set()
+let lastNotifyAt = 0
+
+/**
+ * Yakalama başarısız olduğunda durumu görünür kılar: rozet, popup ve (çok sık
+ * olmamak kaydıyla) sistem bildirimi. Tarayıcı indirmesi artık iptal
+ * edilmediği için dosya kaybolmaz; kullanıcı yalnızca neden IDMS'e
+ * düşmediğini görür.
+ */
+async function reportCaptureError(err) {
+  const message = String(err?.message || err || 'IDMS bağlantıyı alamadı')
+  try {
+    await cfgSet({ lastError: message })
+  } catch {
+    /* yoksay */
+  }
+  setBadge('!', '#d1242f')
+  broadcastToPopup({ type: 'error', error: message })
+  if (Date.now() - lastNotifyAt < 60000) return
+  lastNotifyAt = Date.now()
+  try {
+    const ret = api.notifications.create({
+      type: 'basic',
+      iconUrl: api.runtime.getURL('icons/icon128.png'),
+      title: 'IDMS',
+      message
+    })
+    if (ret && typeof ret.catch === 'function') ret.catch(() => {})
+  } catch {
+    /* bildirim izni yok */
+  }
+}
+
+async function clearLastError() {
+  try {
+    const cfg = await cfgGet()
+    if (cfg.lastError) await cfgSet({ lastError: '' })
+  } catch {
+    /* yoksay */
+  }
+}
 
 async function onDownloadCreated(item) {
   try {
@@ -493,6 +654,23 @@ async function onDownloadCreated(item) {
     if (!/^https?:/i.test(url)) return
 
     takingOver.add(item.id)
+    const name = item.filename ? item.filename.split(/[\\/]/).pop() : fileNameOf(url)
+    try {
+      // Önce IDMS'e ilet, sonra tarayıcı indirmesini iptal et. Ters sırada
+      // (önce iptal) uygulama kapalıyken ya da eşleştirme geçersizken dosya
+      // tamamen kayboluyordu: tarayıcı indirmesi de IDMS indirmesi de yok.
+      await sendTarget({
+        url,
+        pageUrl: item.referrer || '',
+        media: isExtractorUrl(url),
+        name
+      })
+    } catch (err) {
+      // IDMS almadı: tarayıcı indirmesi olduğu gibi devam etsin.
+      void reportCaptureError(err)
+      return
+    }
+
     try {
       await api.downloads.cancel(item.id)
     } catch {
@@ -504,13 +682,7 @@ async function onDownloadCreated(item) {
       /* yoksay */
     }
 
-    const name = item.filename ? item.filename.split(/[\\/]/).pop() : fileNameOf(url)
-    await sendTarget({
-      url,
-      pageUrl: item.referrer || '',
-      media: isExtractorUrl(url),
-      name
-    })
+    void clearLastError()
     bumpCount(1)
   } catch (err) {
     broadcastToPopup({ type: 'error', error: String(err?.message || err) })
@@ -644,6 +816,7 @@ async function stateForPopup() {
     online: !!found,
     integration: found ? found.info?.integration !== false : null,
     count: cfg.count,
+    lastError: cfg.lastError,
     tabId,
     detected,
     origin: api.runtime.getURL('')
@@ -712,18 +885,31 @@ async function onMessage(msg, sender) {
       await clearDetected(msg.tabId)
       return { ok: true }
 
-    // --- İçerik betiği ---
-    case 'float':
-      await floatSend(msg)
-      return { ok: true }
+    // --- İçerik betiği: sayfa içi yüzen panel ---
+    case 'float-formats':
+    case 'float-download':
+    case 'float-action': {
+      // Yalnızca bir sekmede çalışan içerik betiğinden kabul edilir.
+      if (!sender?.tab) return { ok: false, error: 'Yalnızca sayfa içinden kullanılabilir' }
+      return await floatRequest(msg, sender)
+    }
 
     case 'link-click': {
-      await sendTarget({
-        url: msg.url,
-        pageUrl: msg.pageUrl || sender?.tab?.url || '',
-        media: !!msg.media,
-        name: msg.name || ''
-      })
+      try {
+        await sendTarget({
+          url: msg.url,
+          pageUrl: msg.pageUrl || sender?.tab?.url || '',
+          media: !!msg.media,
+          name: msg.name || ''
+        })
+      } catch (err) {
+        // İçerik betiği bu hatayı görüp tıklamayı tarayıcıya geri bırakır.
+        const message = String(err?.message || err)
+        await cfgSet({ lastError: message }).catch(() => {})
+        broadcastToPopup({ type: 'error', error: message })
+        return { ok: false, error: message }
+      }
+      await cfgSet({ lastError: '' }).catch(() => {})
       bumpCount(1)
       return { ok: true, message: 'IDMS kuyruğuna eklendi' }
     }

@@ -18,7 +18,10 @@ const DEFAULT_SETTINGS: Settings = {
     confirmBeforeDownload: true,
     monitorClipboard: true,
     startOnBoot: false,
-    startMinimized: false
+    startMinimized: false,
+    categoryDirs: {},
+    customCategories: [],
+    duplicatePolicy: 'ask'
   },
   notifications: {
     onStart: true,
@@ -27,7 +30,9 @@ const DEFAULT_SETTINGS: Settings = {
     onError: true,
     systemToasts: true,
     inAppToasts: true,
-    playSound: true
+    playSound: true,
+    progressWindow: true,
+    completeWindow: true
   },
   social: {
     ytdlpPath: '',

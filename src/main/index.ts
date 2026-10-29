@@ -10,38 +10,112 @@ import {
   nativeImage,
   protocol
 } from 'electron'
-import { join, dirname, basename } from 'path'
-import { existsSync, writeFileSync, promises as fsp } from 'fs'
+import { join, dirname, basename, extname } from 'path'
+import { spawn } from 'child_process'
+import {
+  existsSync,
+  writeFileSync,
+  promises as fsp,
+  mkdirSync,
+  copyFileSync,
+  unlinkSync
+} from 'fs'
 import type {
   AddDownloadRequest,
   AppToast,
   DeepPartial,
   DownloadItem,
+  DownloadState,
+  DownloadWindowAction,
+  DownloadWindowRequest,
   ExtensionEvent,
   FloatFormat,
   FloatMediaInfo,
+  GeckoInstallResult,
   IpcApi,
   MediaDownloadRequest,
   Settings
 } from '@shared/types'
 import { Store } from './store'
-import { DownloadManager, startScheduler } from './engine/manager'
+import { DownloadManager, categoryForFilename, startScheduler, uniquePath } from './engine/manager'
 import { Notifier } from './notify'
 import { ExtensionServer } from './extServer'
 import { TorrentManager, registerMagnetProtocol } from './torrent'
 import { ToolLocator, YtdlpRunner } from './ytdlp'
 import { probeUrl } from './engine/probe'
-import { FloatPanel } from './floatPanel'
+import { FloatService } from './floatService'
+import { DownloadWindows, type DownloadWindowContext } from './downloadWindows'
+import {
+  installGeckoExtension,
+  listGeckoProfiles,
+  pathsEqual,
+  uninstallGeckoExtension
+} from './extGecko'
+
 import {
   classifyProbeError,
   formatsFromProbe,
   formatsFromSources,
   isGenericPage,
   isStreamAddress,
+  probeFirstTarget,
   type FloatProbeResult
 } from './floatFormats'
 import { fillFormatSizes } from './floatSizes'
 import { setLanguage, t, formatBytes, formatSpeed } from './lang'
+
+// ---------------------------------------------------------------------------
+// Kullanıcı verisi klasörü
+// ---------------------------------------------------------------------------
+
+/**
+ * Chromium, kullanıcı verisi klasörüne kilit dosyası yazamazsa uygulama
+ * sessizce kapanır (requestSingleInstanceLock false döner). Uygulama kısıtlı
+ * bir ortamda (ör. düşük bütünlükte) çalıştırıldığında %APPDATA% yazılamaz;
+ * bu durumda kurulum klasörünün yanındaki "userdata" klasörüne geçilir ve
+ * mevcut ayarlar oraya bir kez kopyalanır. Böylece uygulama yine de açılır.
+ */
+function resolveUserDataDir(): void {
+  const def = app.getPath('userData')
+  const portable = join(dirname(app.getPath('exe')), 'userdata')
+
+  const writable = (dir: string): boolean => {
+    // accessSync yalnızca ACL'e bakar; düşük bütünlükteki süreçlerde
+    // bütünlük etiketi yazmayı yine de engeller. Bu yüzden gerçek bir
+    // yazma denemesi yapılır.
+    const probe = join(dir, `.write-probe-${process.pid}-${Date.now()}`)
+    try {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(probe, 'ok', 'utf8')
+      unlinkSync(probe)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // Daha önce taşınmış bir profil varsa her açılışta onu kullan: böylece
+  // kısıtlı ve normal başlatmalar aynı ayarları/indirmeleri görür.
+  if (existsSync(join(portable, 'idms2', 'settings.json'))) {
+    app.setPath('userData', portable)
+    return
+  }
+
+  if (writable(def) || !writable(portable)) return
+
+  try {
+    mkdirSync(join(portable, 'idms2'), { recursive: true })
+    for (const file of ['settings.json', 'downloads.json']) {
+      const src = join(def, 'idms2', file)
+      if (existsSync(src)) copyFileSync(src, join(portable, 'idms2', file))
+    }
+  } catch (err) {
+    console.error('[userData] taşıma başarısız', err)
+  }
+  app.setPath('userData', portable)
+}
+
+resolveUserDataDir()
 
 // ---------------------------------------------------------------------------
 // Tek örnek kilidi: ikinci kopya açılırsa mevcut pencereyi öne getir
@@ -60,9 +134,13 @@ let extServer: ExtensionServer
 let torrentMgr: TorrentManager
 let locator: ToolLocator
 let ytdlp: YtdlpRunner
-let floatPanel: FloatPanel
+let floatService: FloatService
+let downloadWindows: DownloadWindows
 let stopScheduler: (() => void) | null = null
 let clipboardTimer: ReturnType<typeof setInterval> | null = null
+
+/** İndirme durumlarının son görülen hâli: ilerleme penceresini yalnızca geçişte aç. */
+const lastStates = new Map<string, DownloadState>()
 
 const toasts: AppToast[] = []
 
@@ -78,7 +156,10 @@ function createWindow(): void {
     minHeight: 560,
     show: false,
     backgroundColor: '#f4f6f9',
-    title: 'IDMS2',
+    title: 'IDMS',
+    icon: app.isPackaged
+      ? join(process.resourcesPath, 'icon.png')
+      : join(app.getAppPath(), 'resources', 'icon.png'),
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
@@ -176,10 +257,15 @@ function wireNotifier(): void {
   })
 
   notifier.on('clipboard-download', ({ url }: { url: string }) => {
-    void manager.add({ url, silent: false })
+    void requestDownloadFlow({ url })
   })
 
-  notifier.on('retry', ({ id }: { id: string }) => manager.start(id))
+  notifier.on('retry', ({ id }: { id: string }) => {
+    const item = manager.get(id)
+    // Medya kaydı HTTP motoruna düşmemeli: yt-dlp yeniden koşar
+    if (item?.kind === 'media') return retryMediaDownload(item)
+    manager.start(id)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -189,27 +275,66 @@ function wireManager(): void {
   manager.on('downloads', (items: DownloadItem[]) => {
     sendToRenderer('downloads', items)
     extServer.broadcastStatus()
+    syncDownloadWindows(items)
   })
 
   manager.on('progress', (item: DownloadItem) => {
     sendToRenderer('progress', item)
+    downloadWindows?.pushDownload(item.id)
     if (item.state === 'downloading') notifier.notifyProgress(item)
   })
 
   manager.on('completed', (item: DownloadItem) => {
     notifier.notifyComplete(item)
     sendToRenderer('item', item)
+    downloadWindows?.closeProgress(item.id)
+    if (store.getSettings().notifications.completeWindow !== false) {
+      downloadWindows?.openComplete(item.id)
+    } else {
+      downloadWindows?.closeComplete(item.id)
+    }
   })
 
   manager.on('download-error', (item: DownloadItem) => {
     notifier.notifyError(item)
     sendToRenderer('item', item)
+    downloadWindows?.pushDownload(item.id)
   })
 
   // "İndirmeden önce" bildirimi: onay modu açıksa istek anında toast göster
   manager.on('confirm-required', (item: DownloadItem) => {
     notifier.notifyStart(item, true)
   })
+}
+
+/**
+ * Durum değişimlerinde IDM pencerelerini yönetir: indirme başlarken ilerleme
+ * penceresi, iptalde kapanış. Tamamlanma penceresi `completed` olayında açılır.
+ */
+function syncDownloadWindows(items: DownloadItem[]): void {
+  if (!downloadWindows) return
+  const settings = store.getSettings()
+  for (const item of items) {
+    const prev = lastStates.get(item.id)
+    if (item.state === 'downloading' && prev !== 'downloading') {
+      if (settings.notifications.progressWindow !== false) {
+        downloadWindows.openProgress(item.id)
+      }
+    }
+    if (item.state === 'canceled' && prev !== 'canceled') {
+      downloadWindows.closeProgress(item.id)
+    }
+    if (item.state !== 'completed') downloadWindows.pushDownload(item.id)
+    lastStates.set(item.id, item.state)
+  }
+  // Listedeki kayıtlar silinmiş olabilir (temizleme/kaldırma)
+  for (const id of [...lastStates.keys()]) {
+    if (!items.some((i) => i.id === id)) {
+      lastStates.delete(id)
+      downloadWindows.closeProgress(id)
+      downloadWindows.closeComplete(id)
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,8 +393,8 @@ function wireExtensionMedia(): void {
     sendToRenderer('extension-event', evt)
   })
 
-  // Yüzen IDMS paneli: eklenti oynayan medyayı ve ekran dikdörtgenini bildirir
-  extServer.on('float-media', (payload: any) => floatPanel.handle(payload))
+  // Yüzen IDMS paneli artık sayfanın içinde çizilir; uygulama yalnızca
+  // kalite listesini ve indirme eylemlerini sağlar (bkz. floatService.ts).
   extServer.on('open-app-requested', () => revealMainWindow())
 
   extServer.on('client-added', (client: string) => {
@@ -315,6 +440,8 @@ async function startMediaDownload(req: MediaDownloadRequest): Promise<{ id: stri
   })
   manager.patchItem(item.id, {
     category: mediaCategory,
+    // Dosya gerçekten bu klasöre yazılacak (adı yt-dlp tamamlayınca belli olur)
+    savePath: join(saveDir, item.name),
     media: {
       site: hostOf(req.url),
       wantedQuality: quality,
@@ -326,10 +453,27 @@ async function startMediaDownload(req: MediaDownloadRequest): Promise<{ id: stri
   if (created) notifier.notifyStart(created, false)
   sendToRenderer('extension-event', { type: 'download-requested', url: req.url })
 
-  const controller = new AbortController()
-  mediaControllers.set(item.id, controller)
+  runMediaDownload(item.id, req, saveDir, quality)
+  return { id: item.id }
+}
 
-  manager.externalStarted(item.id)
+/**
+ * yt-dlp'yi bir kayıt için koşar. İlk indirme ve "yeniden dene" aynı yolu
+ * kullanır; böylece başarısız bir medya kaydı HTTP motoruna düşmez.
+ */
+function runMediaDownload(
+  id: string,
+  req: MediaDownloadRequest,
+  saveDir: string,
+  quality: 'best' | 'audio',
+  forceOverwrite = false
+): void {
+  if (mediaControllers.has(id)) return
+  const settings = store.getSettings()
+  const controller = new AbortController()
+  mediaControllers.set(id, controller)
+
+  manager.externalStarted(id)
 
   void (async () => {
     try {
@@ -342,37 +486,142 @@ async function startMediaDownload(req: MediaDownloadRequest): Promise<{ id: stri
           pageUrl: req.pageUrl,
           cookies: req.cookies,
           useCookies: settings.social.passCookies,
-          impersonate: settings.social.impersonate
+          impersonate: settings.social.impersonate,
+          forceOverwrite
         },
         {
-          onStart: () => manager.externalStarted(item.id),
+          onStart: () => manager.externalStarted(id),
           onProgress: (p) => {
-            manager.externalProgress(item.id, {
+            const totalBytes = p.totalBytes && p.totalBytes > 0 ? p.totalBytes : 0
+            manager.externalProgress(id, {
               percent: p.percent,
               speed: p.speed,
               etaSeconds: p.etaSeconds,
-              downloadedBytes: Math.round(p.percent * 1000),
-              totalBytes: 1000,
+              // Gerçek akış boyutu biliniyorsa onu göster; uydurma bayt yazma
+              ...(totalBytes > 0
+                ? {
+                    totalBytes,
+                    downloadedBytes: Math.min(totalBytes, Math.round(p.percent * totalBytes))
+                  }
+                : {}),
               statusLine: p.statusLine
             })
           }
         },
         controller.signal
       )
-      manager.externalComplete(item.id, result.filePath)
+      manager.externalComplete(id, result.filePath)
     } catch (e: any) {
       const msg = e?.message || t('err.generic')
-      if (msg.includes('iptal')) manager.externalState(item.id, 'canceled')
-      else manager.externalError(item.id, msg)
+      if (msg.includes('iptal')) {
+        // Duraklatma da süreci sonlandırır; durumu manager belirlediyse koru
+        if (manager.get(id)?.state === 'downloading') manager.externalState(id, 'canceled')
+      } else {
+        manager.externalError(id, msg)
+      }
     } finally {
-      mediaControllers.delete(item.id)
+      mediaControllers.delete(id)
     }
   })()
+}
 
-  return { id: item.id }
+/** Başarısız/duraklatılmış medya indirmesini aynı kayıt üzerinde yeniden koşar. */
+function retryMediaDownload(item: DownloadItem): void {
+  const settings = store.getSettings()
+  const quality = item.media?.wantedQuality || settings.social.preferredQuality
+  const saveDir = join(settings.general.downloadDir, quality === 'audio' ? 'audio' : 'video')
+
+  // Hatalı denemede geride kalan bozuk parça dosyaları varsa baştan indir
+  const forceOverwrite = item.state === 'error'
+
+  manager.patchItem(item.id, {
+    errorMessage: undefined,
+    finishedAt: undefined,
+    progress: {
+      percent: 0,
+      downloadedBytes: 0,
+      totalBytes: 0,
+      speed: 0,
+      etaSeconds: null,
+      connections: 0
+    }
+  })
+
+  runMediaDownload(
+    item.id,
+    {
+      url: item.url,
+      pageUrl: item.pageUrl,
+      quality,
+      formatId: item.media?.formatId,
+      silent: true
+    },
+    saveDir,
+    quality,
+    forceOverwrite
+  )
 }
 
 const mediaControllers = new Map<string, AbortController>()
+
+/**
+ * Eski sürüm, birleştirme sonrası silinen parça dosyasının yolunu (ör.
+ * "Video.f251.webm") kaydetmişti. Tamamlanmış medya kaydında dosya yoksa aynı
+ * klasördeki gerçek çıktıyı (Video.mkv/mp4/mp3…) bulup kaydı düzeltir.
+ */
+async function repairMediaPaths(mgr: DownloadManager): Promise<void> {
+  for (const item of mgr.list()) {
+    if (item.kind !== 'media' || item.state !== 'completed' || !item.savePath) continue
+    if (existsSync(item.savePath)) continue
+
+    const dir = dirname(item.savePath)
+    const file = basename(item.savePath)
+    // "Ad.f251.webm" → "Ad"; tek parçalı indirmede yalnızca uzantı atılır
+    const stem = file.replace(/\.f[\w-]+\.[^.]+$/, '').replace(/\.[^.]+$/, '')
+    if (!stem) continue
+    // Uygulama adı sadeleştirirken "|" gibi karakterleri boşluğa çeviriyor,
+    // yt-dlp ise "｜" yazıyor: harf/rakam dışını atarak karşılaştır.
+    const target = stem.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+    if (!target) continue
+
+    let entries: string[]
+    try {
+      entries = await fsp.readdir(dir)
+    } catch {
+      continue
+    }
+
+    let best: { path: string; size: number; mtime: number } | null = null
+    for (const f of entries) {
+      if (/\.(part|ytdl|temp)$/i.test(f)) continue
+      if (/\.f[\w-]+\.[^.]+$/i.test(f)) continue
+      const nameStem = f.replace(/\.[^.]+$/, '')
+      if (nameStem.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '') !== target) continue
+      const p = join(dir, f)
+      try {
+        const st = await fsp.stat(p)
+        if (!st.isFile()) continue
+        // Birleştirme çıktısı en son yazılan dosyadır
+        if (!best || st.mtimeMs > best.mtime) best = { path: p, size: st.size, mtime: st.mtimeMs }
+      } catch {
+        /* yoksay */
+      }
+    }
+    if (!best) continue
+
+    mgr.patchItem(item.id, {
+      savePath: best.path,
+      name: basename(best.path),
+      category: categoryForFilename(basename(best.path)),
+      progress: {
+        ...item.progress,
+        percent: 1,
+        totalBytes: best.size,
+        downloadedBytes: best.size
+      }
+    })
+  }
+}
 
 function hostOf(u: string): string {
   try {
@@ -441,6 +690,7 @@ async function floatDownload(
         quality: kind === 'audio' ? 'audio' : 'best',
         formatId: isYtdlpFormat ? format.formatId : undefined,
         name: kind === 'audio' ? undefined : m.title || undefined,
+        cookies: m.cookies,
         silent: true
       })
       if (!res) return { ok: false, message: t('err.ytdlpMissing') }
@@ -461,25 +711,57 @@ async function floatDownload(
 }
 
 /**
- * Panelin kalite listesi: oynatıcının <source> seçenekleri varsa onlar,
- * yoksa yt-dlp biçim listesi (video kaliteleri + ses dosyaları).
+ * Panelin kalite listesi: ekstraktör sitelerinde (Reddit, YouTube…) oynatıcının
+ * tek `<source>`'u tam listeyi vermez; önce yt-dlp biçimleri denenir, olmazsa
+ * oynatıcının `<source>` seçeneklerine düşülür. Diğer sayfalarda kaynaklar
+ * varsa doğrudan onlar kullanılır (yt-dlp beklemesi yok).
  */
 async function floatProbeFormats(m: FloatMediaInfo): Promise<FloatProbeResult> {
   const hasSources = Array.isArray(m.sources) && m.sources.length > 0
   const hasYtdlp = !!locator.findYtdlp()
   const audioExtract = hasYtdlp && !!locator.findFfmpeg()
 
-  // Doğrudan dosya / çoklu <source>: hızlı yol, yt-dlp beklemesi yok
-  if (hasSources || isDirectMedia(m)) {
+  /** Oynatıcının kendi listesi: hızlı yol, yt-dlp beklemesi yok. */
+  const fromSources = async (): Promise<FloatProbeResult> => {
     const formats = formatsFromSources(m, { audioExtract })
     if (!formats.length) return { ok: false, formats: [], note: t('float.noFormats') }
     // Boyutlar oynatıcıdan gelmez: HEAD ile Content-Length sorgulanır.
     return { ok: true, formats: await fillFormatSizes(formats, { pageUrl: m.pageUrl }) }
   }
 
+  // Oynatıcının indirdiği HLS/DASH manifesti: kaliteler ve ayrı ses akışı
+  // orada listelenir (Reddit tek bir mp4 <source> gösterir). Manifest kendi
+  // başına çözülebildiği için sayfa oturumu gerekmez.
+  const manifest = typeof m.manifest === 'string' ? m.manifest.trim() : ''
+  if (
+    hasYtdlp &&
+    /^https?:\/\//i.test(manifest) &&
+    (m.needsExtractor || !hasSources || m.sources!.length <= 1)
+  ) {
+    const probed = await runProbe(manifest, manifest, m.cookies)
+    if (probed.formats.length) return probed
+  }
+
+  // Doğrudan dosya / çoklu <source>: hızlı yol, yt-dlp beklemesi yok
+  if (!hasSources && isDirectMedia(m)) return fromSources()
+
   const target =
     m.needsExtractor || !/^https?:\/\//i.test(m.url) ? m.pageUrl || m.url : m.url
-  if (!/^https?:\/\//i.test(target)) {
+  const targetOk = /^https?:\/\//i.test(target)
+
+  // Ekstraktör sitesinde oynatıcı genellikle tek kopya sunar (Reddit'in
+  // doğrudan mp4'ü); tam kalite + ses listesi için önce yt-dlp denenir.
+  // Çözülemezse oynatıcının kaynaklarına düşülür.
+  if (hasSources) {
+    const probeTarget = probeFirstTarget(m)
+    if (probeTarget && hasYtdlp) {
+      const probed = await runProbe(probeTarget, undefined, m.cookies)
+      if (probed.formats.length) return probed
+    }
+    return fromSources()
+  }
+
+  if (!targetOk) {
     return { ok: false, formats: [], note: t('float.unsupported') }
   }
   // Ana sayfa, keşfet veya profil gibi liste sayfalarını yt-dlp çözemez
@@ -489,11 +771,25 @@ async function floatProbeFormats(m: FloatMediaInfo): Promise<FloatProbeResult> {
   }
   if (!hasYtdlp) return { ok: false, formats: [], note: t('float.needYtdlp') }
 
+  return runProbe(target, undefined, m.cookies)
+}
+
+/**
+ * yt-dlp biçim listesini panel satırlarına çevirir (hata kısa nota dönüşür).
+ * `sourceUrl` verilirse satırlar o adresi taşır: HLS/DASH manifesti doğrudan
+ * indirilir, sayfa oturumu yeniden çözülmez.
+ */
+async function runProbe(
+  target: string,
+  sourceUrl?: string,
+  cookies?: FloatMediaInfo['cookies']
+): Promise<FloatProbeResult> {
   try {
     const settings = store.getSettings()
     const probe = await withTimeout(
       ytdlp.probe({
         url: target,
+        cookies,
         useCookies: settings.social.passCookies,
         impersonate: settings.social.impersonate
       }),
@@ -505,7 +801,16 @@ async function floatProbeFormats(m: FloatMediaInfo): Promise<FloatProbeResult> {
     }
     const formats = formatsFromProbe(probe.formats)
     if (!formats.length) return { ok: false, formats: [], note: t('float.noFormats') }
-    return { ok: true, formats }
+    return {
+      ok: true,
+      formats: sourceUrl
+        ? formats.map((f) => ({
+            ...f,
+            // Kalite kimliği manifest içinde aranır (formatId), adres manifesttir
+            url: sourceUrl
+          }))
+        : formats
+    }
   } catch (e: any) {
     return { ok: false, formats: [], note: probeErrorNote(String(e?.message || e)) }
   }
@@ -561,6 +866,290 @@ function revealMainWindow(): void {
   win.focus()
 }
 
+/* ------------------------------------------------------------------------- */
+/* IDM tarzı indirme pencereleri                                             */
+/* ------------------------------------------------------------------------- */
+
+/** Ana pencereden veya kısayoldan "Dosya İndirme Bilgisi" penceresini açar. */
+async function openAddDownloadWindow(url?: string): Promise<void> {
+  const request: DownloadWindowRequest = { url: (url || '').trim(), start: true }
+  const existing = request.url ? manager.findDuplicate(request.url) : undefined
+  if (existing) {
+    await handleDuplicate(existing, request)
+    return
+  }
+  downloadWindows.openAdd(request)
+}
+
+/* ------------------------------------------------------------------------- */
+/* Eklenti köprüsü: onay penceresinin sonucunu bekleyen istekler             */
+/* ------------------------------------------------------------------------- */
+
+type FlowResult = { id?: string } | null
+interface PendingFlow {
+  resolve: (r: FlowResult) => void
+  timer: NodeJS.Timeout
+}
+
+/** Aynı URL / aynı mevcut kayıt için bekleyen eklenti istekleri */
+const pendingAddFlows = new Map<string, PendingFlow[]>()
+const pendingDupFlows = new Map<string, PendingFlow[]>()
+/** Pencere kapanırken "karar verildi" sayılması gereken işlemler */
+const submittingAdd = new Set<string>()
+const submittingDup = new Set<string>()
+/** Eklentiden gelen oturum çerezleri (yalnızca bu akış için, diske yazılmaz) */
+const flowHeaders = new Map<string, Record<string, string>>()
+
+function waitForFlow(
+  map: Map<string, PendingFlow[]>,
+  key: string,
+  open: () => void,
+  timeoutMs = 60000
+): Promise<FlowResult> {
+  return new Promise((resolve) => {
+    const entry: PendingFlow = {
+      resolve,
+      timer: setTimeout(() => settleFlows(map, key, null), timeoutMs)
+    }
+    const list = map.get(key) || []
+    list.push(entry)
+    map.set(key, list)
+    open()
+  })
+}
+
+function settleFlows(
+  map: Map<string, PendingFlow[]>,
+  key: string,
+  value: FlowResult
+): void {
+  const list = map.get(key)
+  if (!list) return
+  map.delete(key)
+  for (const entry of list) {
+    clearTimeout(entry.timer)
+    entry.resolve(value)
+  }
+}
+
+/**
+ * Kullanıcı pencereyi kapattıysa bekleyen eklenti isteği "kabul edilmedi"
+ * olarak sonlanır; eklenti tarayıcı indirmesini iptal etmez.
+ */
+function handleWindowClosed(ctx: DownloadWindowContext): void {
+  if (ctx.mode === 'add') {
+    if (submittingAdd.has(ctx.request.url)) return
+    settleFlows(pendingAddFlows, ctx.request.url, null)
+    return
+  }
+  if (ctx.mode === 'duplicate') {
+    if (submittingDup.has(ctx.existingId)) return
+    settleFlows(pendingDupFlows, ctx.existingId, null)
+    settleFlows(pendingAddFlows, ctx.request.url, null)
+  }
+}
+
+/**
+ * Renderer'a gönderilen ayarlar: eşleştirme token'ı ve izinli kökenler ana
+ * süreçte kalır (UI bunlara ihtiyaç duymaz).
+ */
+function publicSettings(): Settings {
+  const s = store.getSettings()
+  return { ...s, extension: { ...s.extension, token: '', allowedOrigins: [] } }
+}
+
+/**
+ * Pano/eklenti gibi dış kaynaklardan gelen indirme isteği. Aynı URL varsa
+ * "Aynı indirme bağlantısı" penceresi, onay ayarı açıksa "Dosya İndirme
+ * Bilgisi" penceresi gösterilir; aksi hâlde doğrudan kuyruğa eklenir.
+ *
+ * `awaitDecision` yalnızca eklenti köprüsünde true'dur: tarayıcı indirmesinin
+ * iptal edilip edilmeyeceğine karar vermek için kullanıcının penceredeki
+ * seçimi beklenir. Aksi hâlde pencere açılır açılmaz `null` dönülür.
+ */
+async function requestDownloadFlow(
+  req: AddDownloadRequest,
+  awaitDecision = false
+): Promise<{ id?: string } | null> {
+  const settings = store.getSettings()
+  const request: DownloadWindowRequest = {
+    url: req.url,
+    pageUrl: req.pageUrl,
+    name: req.name,
+    savePath: req.savePath,
+    category: req.category,
+    description: req.description,
+    silent: req.silent,
+    start: true
+  }
+  if (req.headers && Object.keys(req.headers).length > 0) {
+    flowHeaders.set(req.url, req.headers)
+    const timer = setTimeout(() => flowHeaders.delete(req.url), 10 * 60 * 1000)
+    timer.unref?.()
+  }
+
+  const existing = manager.findDuplicate(req.url)
+  if (existing) {
+    const policy = settings.general.duplicatePolicy || 'ask'
+    if (policy === 'ask' && awaitDecision) {
+      return waitForFlow(pendingDupFlows, existing.id, () =>
+        downloadWindows.openDuplicate(existing.id, request)
+      )
+    }
+    const item = await handleDuplicate(existing, request)
+    return item ? { id: item.id } : null
+  }
+
+  if (settings.general.confirmBeforeDownload && !req.silent) {
+    if (!awaitDecision) {
+      downloadWindows.openAdd(request)
+      return null
+    }
+    return waitForFlow(pendingAddFlows, request.url, () => downloadWindows.openAdd(request))
+  }
+
+  const item = await createDownload(request, true)
+  return { id: item.id }
+}
+
+/** Ekleme penceresinden gelen onay: kaydı oluşturur veya aynı URL'yi sorar. */
+async function submitAdd(
+  request: DownloadWindowRequest,
+  start: boolean
+): Promise<DownloadItem | null> {
+  const next: DownloadWindowRequest = { ...request, silent: true, start }
+  const existing = manager.findDuplicate(next.url)
+  if (existing) {
+    const item = await handleDuplicate(existing, next)
+    // Politika "ask" ise seçim penceresi açıldı; karar orada verilir.
+    if (item) settleFlows(pendingAddFlows, next.url, { id: item.id })
+    return item
+  }
+  const item = await createDownload(next, start)
+  settleFlows(pendingAddFlows, next.url, { id: item.id })
+  return item
+}
+
+async function createDownload(
+  request: DownloadWindowRequest,
+  start: boolean
+): Promise<DownloadItem> {
+  const headers = flowHeaders.get(request.url)
+  flowHeaders.delete(request.url)
+  const item = await manager.add({
+    url: request.url,
+    pageUrl: request.pageUrl,
+    name: request.name,
+    savePath: request.savePath,
+    category: request.category,
+    description: request.description,
+    silent: true,
+    start,
+    headers
+  })
+  if (start) manager.start(item.id)
+  return item
+}
+
+/** Aynı URL politikasını uygular; "ask" ise seçim penceresini açar. */
+async function handleDuplicate(
+  existing: DownloadItem,
+  request: DownloadWindowRequest
+): Promise<DownloadItem | null> {
+  const policy = store.getSettings().general.duplicatePolicy || 'ask'
+  if (policy === 'ask') {
+    downloadWindows.openDuplicate(existing.id, request)
+    return null
+  }
+  return resolveDuplicate(policy, existing, request)
+}
+
+async function resolveDuplicate(
+  policy: 'number' | 'overwrite' | 'continue',
+  existing: DownloadItem,
+  request: DownloadWindowRequest
+): Promise<DownloadItem | null> {
+  const start = request.start !== false
+
+  if (policy === 'continue') {
+    // Tamamlanmış kayıt: IDM bitiş penceresini gösterir
+    if (existing.state === 'completed') {
+      downloadWindows.openComplete(existing.id)
+      return existing
+    }
+    if (existing.kind === 'media') {
+      if (existing.state !== 'downloading') retryMediaDownload(existing)
+    } else if (existing.state !== 'downloading' && existing.state !== 'resolving') {
+      manager.start(existing.id)
+    }
+    downloadWindows.openProgress(existing.id)
+    return existing
+  }
+
+  if (policy === 'overwrite') {
+    // Mevcut dosyayı ve kaydı kaldır, aynı yola yeniden indir
+    lastStates.delete(existing.id)
+    try {
+      manager.remove(existing.id, true)
+    } catch {
+      /* kayıt zaten yok */
+    }
+    downloadWindows.closeProgress(existing.id)
+    downloadWindows.closeComplete(existing.id)
+    return createDownload(
+      {
+        ...request,
+        name: existing.name,
+        savePath: existing.savePath,
+        category: request.category || existing.category
+      },
+      start
+    )
+  }
+
+  // Numaralı kopya: dosya adı "ad (1).uzantı" olur
+  const base = request.savePath || existing.savePath
+  return createDownload({ ...request, savePath: numberedPath(base) }, start)
+}
+
+/** Diskte/aktif kayıtlarda çakışmayan numaralı bir yol üretir. */
+function numberedPath(p: string): string {
+  const free = uniquePath(p)
+  if (free !== p) return free
+  const ext = extname(p)
+  const stem = basename(p, ext)
+  for (let i = 1; i < 1000; i++) {
+    const candidate = join(dirname(p), `${stem} (${i})${ext}`)
+    if (existsSync(candidate)) continue
+    if (manager.list().some((it) => it.savePath === candidate)) continue
+    return candidate
+  }
+  return join(dirname(p), `${stem} (${Date.now()})${ext}`)
+}
+
+/** Windows "Birlikte aç" penceresi; diğer platformlarda varsayılan uygulama. */
+function openWith(p: string): void {
+  if (process.platform === 'win32') {
+    try {
+      spawn('rundll32.exe', ['shell32.dll,OpenAs_RunDLL', p], {
+        detached: true,
+        stdio: 'ignore'
+      }).unref()
+      return
+    } catch {
+      /* aşağıdaki yola düş */
+    }
+  }
+  void shell.openPath(p)
+}
+
+/** Paketlenmiş uygulamada `resources/extension`, geliştirmede proje kökü. */
+function extensionRoot(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'extension')
+    : join(app.getAppPath(), 'extension')
+}
+
 // ---------------------------------------------------------------------------
 // IPC
 // ---------------------------------------------------------------------------
@@ -571,9 +1160,15 @@ function registerIpc(): void {
     electron: process.versions.electron
   }))
 
-  ipcMain.handle('settings:get', () => store.getSettings())
+  ipcMain.handle('settings:get', () => publicSettings())
 
   ipcMain.handle('settings:patch', (_e, patch: DeepPartial<Settings>) => {
+    // Token ve izinli kökenler yalnızca ana süreçte yönetilir; renderer'dan
+    // yazılamaz (yanlışlıkla/kötüye kullanımda eşleşme sessizce bozulmasın).
+    if (patch.extension) {
+      delete (patch.extension as any).token
+      delete (patch.extension as any).allowedOrigins
+    }
     const before = store.getSettings()
     const next = store.patchSettings(patch as Partial<Settings>)
     setLanguage(next.general.language)
@@ -581,19 +1176,19 @@ function registerIpc(): void {
 
     // Eklenti sunucusu yaşam döngüsü
     if (patch.extension && extServer) {
+      // Panel ayarı değiştiyse önce açık sekmelere haber ver (sunucu kapanınca
+      // WebSocket bağlantısı kesilir ve içerik betiği haberi alamaz).
+      extServer.broadcastConfig()
       if (!next.extension.enabled) void extServer.stop()
       else void extServer.start()
-    }
-    // Yüzen panel kapatıldıysa pencereyi kaldır
-    if (patch.extension && floatPanel) {
-      if (!next.extension.enabled || next.extension.floatingPanel === false) floatPanel.destroy()
     }
     // Pano izleme
     if (patch.general && next.general.monitorClipboard && !clipboardTimer) {
       startClipboardMonitor()
     }
     void before
-    sendToRenderer('settings', next)
+    sendToRenderer('settings', publicSettings())
+    downloadWindows?.pushAll()
     return next
   })
 
@@ -615,14 +1210,201 @@ function registerIpc(): void {
     return res.canceled || !res.filePaths[0] ? null : res.filePaths[0]
   })
 
-  ipcMain.handle('shell:openPath', (_e, p: string) => shell.openPath(p))
-  ipcMain.handle('shell:showItemInFolder', (_e, p: string) => shell.showItemInFolder(p))
-  ipcMain.handle('ext:dir', () =>
-    app.isPackaged
-      ? join(process.resourcesPath, 'extension')
-      : join(app.getAppPath(), 'extension')
-  )
+  ipcMain.handle('shell:openPath', (_e, p: string) => {
+    // Kayıtlı yol silinmiş olabilir (ör. birleştirme sonrası parça dosyası);
+    // Windows "dosya bulunamadı" penceresi yerine klasörü aç.
+    if (existsSync(p)) return shell.openPath(p)
+    return shell.openPath(dirname(p))
+  })
+  ipcMain.handle('shell:showItemInFolder', (_e, p: string) => {
+    if (existsSync(p)) return shell.showItemInFolder(p)
+    return shell.openPath(dirname(p))
+  })
+  ipcMain.handle('ext:dir', () => extensionRoot())
+
+  /* --- Firefox / Zen (Gecko) kalıcı eklenti kurulumu --- */
+  ipcMain.handle('ext:gecko:list', () => listGeckoProfiles())
+  ipcMain.handle('ext:gecko:install', (_e, profileDir: string): GeckoInstallResult => {
+    const target = listGeckoProfiles().find((p) => pathsEqual(p.profileDir, profileDir))
+    if (!target) return { ok: false, error: 'Profil bulunamadı' }
+    try {
+      installGeckoExtension(target.profileDir, join(extensionRoot(), 'gecko'))
+      return { ok: true, running: target.running }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+  ipcMain.handle('ext:gecko:uninstall', (_e, profileDir: string): GeckoInstallResult => {
+    const target = listGeckoProfiles().find((p) => pathsEqual(p.profileDir, profileDir))
+    if (!target) return { ok: false, error: 'Profil bulunamadı' }
+    try {
+      uninstallGeckoExtension(target.profileDir)
+      return { ok: true, running: target.running }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
   ipcMain.handle('shell:openExternal', (_e, u: string) => shell.openExternal(u))
+  ipcMain.handle('shell:openWith', (_e, p: string) => {
+    openWith(p)
+  })
+
+  /* --- IDM tarzı indirme pencereleri --- */
+  ipcMain.handle('dlwin:openAdd', (_e, url?: string) => openAddDownloadWindow(url))
+
+  ipcMain.handle('dlwin:state', (e) => {
+    const ctx = downloadWindows.contextFor(e.sender.id)
+    return ctx ? downloadWindows.stateFor(ctx) : null
+  })
+
+  ipcMain.handle('dlwin:action', async (e, action: DownloadWindowAction) => {
+    const ctx = downloadWindows.contextFor(e.sender.id)
+    if (!ctx) return null
+
+    switch (action.type) {
+      case 'add-start':
+      case 'add-later': {
+        const start = action.type === 'add-start'
+        // "Bu kategori için bu yolu hatırla" (pencere ayrıca kendisi de yazar)
+        if (action.remember && action.request.savePath && action.request.category) {
+          const current = store.getSettings()
+          const next = store.patchSettings({
+            general: {
+              categoryDirs: {
+                ...(current.general.categoryDirs || {}),
+                [action.request.category]: dirname(action.request.savePath)
+              }
+            }
+          })
+          sendToRenderer('settings', publicSettings())
+          downloadWindows.pushAll()
+        }
+        submittingAdd.add(action.request.url)
+        downloadWindows.closeForWebContents(e.sender.id)
+        try {
+          await submitAdd(action.request, start)
+        } catch (err: any) {
+          settleFlows(pendingAddFlows, action.request.url, null)
+          dialog.showErrorBox(t('common.error'), String(err?.message || err))
+        } finally {
+          submittingAdd.delete(action.request.url)
+        }
+        break
+      }
+
+      case 'add-cancel':
+        settleFlows(pendingAddFlows, ctx.request.url, null)
+        downloadWindows.closeForWebContents(e.sender.id)
+        break
+
+      case 'progress-pause': {
+        if (ctx.mode !== 'progress') break
+        const item = manager.get(ctx.itemId)
+        if (item?.kind === 'media') mediaControllers.get(item.id)?.abort()
+        try {
+          manager.pause(ctx.itemId)
+        } catch {
+          /* kayıt kaldırılmış */
+        }
+        break
+      }
+
+      case 'progress-resume': {
+        if (ctx.mode !== 'progress') break
+        const item = manager.get(ctx.itemId)
+        if (!item) break
+        if (item.kind === 'media') retryMediaDownload(item)
+        else manager.resume(item.id)
+        break
+      }
+
+      case 'progress-cancel': {
+        if (ctx.mode !== 'progress') break
+        mediaControllers.get(ctx.itemId)?.abort()
+        try {
+          manager.cancel(ctx.itemId)
+        } catch {
+          /* kayıt kaldırılmış */
+        }
+        downloadWindows.closeProgress(ctx.itemId)
+        break
+      }
+
+      case 'set-speed-limit': {
+        const next = store.patchSettings({
+          general: { speedLimitMbps: Math.max(0, Number(action.mbps) || 0) }
+        })
+        sendToRenderer('settings', publicSettings())
+        downloadWindows.pushAll()
+        break
+      }
+
+      case 'set-complete-window': {
+        const next = store.patchSettings({
+          notifications: { completeWindow: action.value }
+        })
+        sendToRenderer('settings', publicSettings())
+        downloadWindows.pushAll()
+        break
+      }
+
+      case 'complete-open':
+      case 'complete-open-with':
+      case 'complete-folder':
+      case 'complete-close': {
+        if (ctx.mode !== 'complete') break
+        if (action.dontShowAgain) {
+          const next = store.patchSettings({
+            notifications: { completeWindow: false }
+          })
+          sendToRenderer('settings', publicSettings())
+          downloadWindows.pushAll()
+        }
+        downloadWindows.closeComplete(ctx.itemId)
+        break
+      }
+
+      case 'duplicate-choose': {
+        if (ctx.mode !== 'duplicate') break
+        if (action.remember) {
+          const next = store.patchSettings({
+            general: { duplicatePolicy: action.choice }
+          })
+          sendToRenderer('settings', publicSettings())
+          downloadWindows.pushAll()
+        }
+        submittingDup.add(ctx.existingId)
+        downloadWindows.closeForWebContents(e.sender.id)
+        const existing = manager.get(ctx.existingId)
+        if (!existing) {
+          settleFlows(pendingDupFlows, ctx.existingId, null)
+          settleFlows(pendingAddFlows, ctx.request.url, null)
+          submittingDup.delete(ctx.existingId)
+          break
+        }
+        try {
+          const item = await resolveDuplicate(action.choice, existing, ctx.request)
+          const result: FlowResult = item ? { id: item.id } : null
+          settleFlows(pendingDupFlows, ctx.existingId, result)
+          settleFlows(pendingAddFlows, ctx.request.url, result)
+        } catch (err: any) {
+          settleFlows(pendingDupFlows, ctx.existingId, null)
+          settleFlows(pendingAddFlows, ctx.request.url, null)
+          dialog.showErrorBox(t('common.error'), String(err?.message || err))
+        } finally {
+          submittingDup.delete(ctx.existingId)
+        }
+        break
+      }
+
+      case 'duplicate-cancel':
+        settleFlows(pendingDupFlows, ctx.existingId, null)
+        settleFlows(pendingAddFlows, ctx.request.url, null)
+        downloadWindows.closeForWebContents(e.sender.id)
+        break
+    }
+    return null
+  })
 
   ipcMain.handle('downloads:list', () => manager.list())
 
@@ -631,25 +1413,40 @@ function registerIpc(): void {
   )
 
   ipcMain.handle('downloads:add', async (_e, req: AddDownloadRequest) => {
-    const item = await manager.add(req)
-    // Onay modu açıksa "öncesi" bildirimini yayınla
-    const settings = store.getSettings()
-    if (settings.general.confirmBeforeDownload && !req.silent) {
-      const fresh = manager.get(item.id)
-      if (fresh) notifier.notifyStart(fresh, true)
-      sendToRenderer('confirm-required', fresh)
-    }
-    return { id: item.id, state: manager.get(item.id)?.state }
+    const res = await requestDownloadFlow(req)
+    const item = res?.id ? manager.get(res.id) : undefined
+    return { id: item?.id, state: item?.state }
   })
 
-  ipcMain.handle('downloads:start', (_e, id: string) => manager.start(id))
-  ipcMain.handle('downloads:pause', (_e, id: string) => manager.pause(id))
-  ipcMain.handle('downloads:queue', (_e, id: string) => manager.queue(id))
-  ipcMain.handle('downloads:resume', (_e, id: string) => manager.resume(id))
-  ipcMain.handle('downloads:cancel', (_e, id: string) => manager.cancel(id))
-  ipcMain.handle('downloads:remove', (_e, id: string, deleteFile: boolean) =>
-    manager.remove(id, deleteFile)
-  )
+  ipcMain.handle('downloads:start', (_e, id: string) => {
+    const item = manager.get(id)
+    // Medya kayıtları HTTP motoruna düşmemeli: yt-dlp yeniden koşar
+    if (item?.kind === 'media') return retryMediaDownload(item)
+    manager.start(id)
+  })
+  ipcMain.handle('downloads:pause', (_e, id: string) => {
+    mediaControllers.get(id)?.abort()
+    manager.pause(id)
+  })
+  ipcMain.handle('downloads:queue', (_e, id: string) => {
+    const item = manager.get(id)
+    // Medya indirmeleri HTTP kuyruğuna girmez
+    if (item?.kind === 'media') return item
+    return manager.queue(id)
+  })
+  ipcMain.handle('downloads:resume', (_e, id: string) => {
+    const item = manager.get(id)
+    if (item?.kind === 'media') return retryMediaDownload(item)
+    manager.resume(id)
+  })
+  ipcMain.handle('downloads:cancel', (_e, id: string) => {
+    mediaControllers.get(id)?.abort()
+    manager.cancel(id)
+  })
+  ipcMain.handle('downloads:remove', (_e, id: string, deleteFile: boolean) => {
+    mediaControllers.get(id)?.abort()
+    return manager.remove(id, deleteFile)
+  })
   ipcMain.handle('downloads:confirm', (_e, id: string, savePath?: string, start?: boolean) => {
     const item = manager.confirm(id, savePath, start ?? true)
     return manager.get(id) || item
@@ -707,7 +1504,7 @@ function registerIpc(): void {
     await fsp.writeFile(dest, buf)
     store.patchSettings({ social: { ytdlpPath: dest } })
     locator.updateSettings(store.getSettings())
-    sendToRenderer('settings', store.getSettings())
+    sendToRenderer('settings', publicSettings())
     return dest
   })
 
@@ -846,12 +1643,16 @@ function wireTorrents(): void {
 // ---------------------------------------------------------------------------
 function createTray(): void {
   try {
-    const iconPath = join(app.getAppPath(), 'resources', 'icon.png')
+    // Paketli sürümde simge process.resourcesPath altına kopyalanır
+    // (extraResources); geliştirmede depodaki resources/icon.png kullanılır.
+    const iconPath = app.isPackaged
+      ? join(process.resourcesPath, 'icon.png')
+      : join(app.getAppPath(), 'resources', 'icon.png')
     const img = existsSync(iconPath)
       ? nativeImage.createFromPath(iconPath)
       : nativeImage.createEmpty()
     tray = new Tray(img)
-    tray.setToolTip('IDMS2 — ' + t('app.tagline'))
+    tray.setToolTip('IDMS — ' + t('app.tagline'))
     tray.setContextMenu(
       Menu.buildFromTemplate([
         { label: t('tray.open'), click: () => {
@@ -880,31 +1681,52 @@ function createTray(): void {
 // ---------------------------------------------------------------------------
 // Yaşam döngüsü
 // ---------------------------------------------------------------------------
-app.whenReady().then(async () => {
+if (gotLock) app.whenReady().then(async () => {
   store = new Store()
   setLanguage(store.getSettings().general.language)
   registerMagnetProtocol()
 
   manager = new DownloadManager(store)
   notifier = new Notifier(store)
-  extServer = new ExtensionServer(store, manager)
+  downloadWindows = new DownloadWindows({
+    store,
+    manager,
+    preload: join(__dirname, '../preload/index.mjs'),
+    rendererFile: join(__dirname, '../renderer/download.html'),
+    onClosed: handleWindowClosed
+  })
   torrentMgr = new TorrentManager(store)
   locator = new ToolLocator(store.getSettings())
   ytdlp = new YtdlpRunner(locator, join(app.getPath('userData'), 'idms2', 'tmp'))
 
-  floatPanel = new FloatPanel({
+  floatService = new FloatService({
     store,
     download: floatDownload,
     probeFormats: floatProbeFormats,
     openFormats: floatOpenFormats,
     showMainWindow: revealMainWindow
   })
+  extServer = new ExtensionServer(
+    store,
+    manager,
+    (req) => requestDownloadFlow(req, true),
+    floatService,
+    (req) =>
+      startMediaDownload({
+        url: req.url,
+        pageUrl: req.pageUrl,
+        quality: req.quality as MediaDownloadRequest['quality'],
+        cookies: req.cookies
+      }),
+    app.getVersion()
+  )
 
   wireNotifier()
   wireManager()
   wireExtensionMedia()
   wireTorrents()
   registerIpc()
+  await repairMediaPaths(manager)
 
   stopScheduler = startScheduler(manager)
   torrentMgr.startTicking()
@@ -966,17 +1788,12 @@ async function addMagnet(magnet: string): Promise<void> {
   }
 }
 
-app.on('second-instance', () => {
-  if (win) {
-    if (win.isMinimized()) win.restore()
-    win.show()
-    win.focus()
-  }
-})
-
 app.on('window-all-closed', () => {
-  // Kapatınca arka planda kalmasın (Windows davranışı)
-  app.quit()
+  // Tepsi simgesi varsa uygulama arka planda kalır: arka plan indirmeleri ve
+  // eklenti köprüsü pencere kapalıyken de çalışmaya devam etmeli. Çıkış için
+  // tepsi menüsündeki "Çıkış" kullanılır. Tepsi oluşturulamadıysa eski
+  // davranış (kapatınca çık) korunur.
+  if (!tray) app.quit()
 })
 
 let shuttingDown = false
@@ -988,7 +1805,6 @@ app.on('before-quit', async (e) => {
     stopClipboardMonitor()
     stopScheduler?.()
     await extServer.stop()
-    floatPanel?.destroy()
     manager.persistNow()
     await torrentMgr.shutdown()
   } catch (err) {

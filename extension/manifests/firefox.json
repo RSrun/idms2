@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "IDMS Download Manager",
-  "version": "1.1.0",
-  "description": "Tarayıcı indirmelerini IDMS'e devreder; video/ses üzerinde yüzen IDMS paneli, sağ tık menüsü ve ağ algılama.",
+  "version": "1.2.1",
+  "description": "Tarayıcı indirmelerini IDMS'e devreder; sayfa içinde yüzen IDMS paneli, sağ tık menüsü ve ağ algılama.",
   "browser_specific_settings": {
     "gecko": {
       "id": "idms2@idms2.app",
@@ -32,6 +32,7 @@
     "downloads",
     "storage",
     "contextMenus",
+    "cookies",
     "webRequest",
     "tabs",
     "activeTab",

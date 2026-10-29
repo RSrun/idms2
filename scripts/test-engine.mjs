@@ -45,7 +45,9 @@ const sharedEntry = {
   segment: join(root, 'src', 'main', 'engine', 'segment.ts'),
   extServer: join(root, 'src', 'main', 'extServer.ts'),
   floatFormats: join(root, 'src', 'main', 'floatFormats.ts'),
+  floatService: join(root, 'src', 'main', 'floatService.ts'),
   floatSizes: join(root, 'src', 'main', 'floatSizes.ts'),
+  ytdlp: join(root, 'src', 'main', 'ytdlp.ts'),
   i18n: join(root, 'src', 'shared', 'i18n.ts'),
   types: join(root, 'src', 'shared', 'types.ts')
 }
@@ -81,7 +83,7 @@ async function bundleAll() {
         {
           name: 'test-shared',
           setup(b) {
-            b.onResolve({ filter: /^virtual:(probe|manager|segment|extServer|i18n|types)$/ }, (a) => ({
+            b.onResolve({ filter: /^virtual:(probe|manager|segment|extServer|i18n|types|ytdlp|floatFormats|floatService|floatSizes)$/ }, (a) => ({
               path: join(outDir, `${a.path.split(':')[1]}.mjs`),
               external: true
             }))

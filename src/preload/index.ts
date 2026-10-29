@@ -4,11 +4,14 @@ import type {
   AppToast,
   DeepPartial,
   DownloadItem,
+  DownloadWindowAction,
+  DownloadWindowApi,
+  DownloadWindowState,
   ExtensionEvent,
   ExtensionServerStatus,
-  FloatAction,
   FloatMediaInfo,
-  FloatPanelState,
+  GeckoInstallResult,
+  GeckoProfile,
   IpcApi,
   MediaDownloadRequest,
   MediaProbeResult,
@@ -91,6 +94,11 @@ const extra = {
   listToasts: (): Promise<AppToast[]> => ipcRenderer.invoke('notify:toasts'),
   clearToasts: (id?: string): Promise<AppToast[]> => ipcRenderer.invoke('notify:clear', id),
   openExternal: (u: string) => ipcRenderer.invoke('shell:openExternal', u),
+  /** Dosyayı "Birlikte aç" penceresiyle aç (Windows) */
+  openWith: (p: string): Promise<void> => ipcRenderer.invoke('shell:openWith', p),
+  /** IDM tarzı "Dosya İndirme Bilgisi" penceresini aç */
+  openAddDownloadWindow: (url?: string): Promise<void> =>
+    ipcRenderer.invoke('dlwin:openAdd', url),
   /** URL kontrolü (probe) tipi */
   probe: (url: string, pageUrl?: string): Promise<UrlProbeResult> =>
     ipcRenderer.invoke('downloads:probe', url, pageUrl),
@@ -103,20 +111,27 @@ const extra = {
   },
   /** yt-dlp'i resmi kaynaktan indir (Ayarlar → Sosyal medya) */
   fetchYtdlp: (): Promise<string> => ipcRenderer.invoke('social:fetchYtdlp'),
+  /** Firefox / Zen profillerine kalıcı eklenti kurulumu */
+  gecko: {
+    list: (): Promise<GeckoProfile[]> => ipcRenderer.invoke('ext:gecko:list'),
+    install: (profileDir: string): Promise<GeckoInstallResult> =>
+      ipcRenderer.invoke('ext:gecko:install', profileDir),
+    uninstall: (profileDir: string): Promise<GeckoInstallResult> =>
+      ipcRenderer.invoke('ext:gecko:uninstall', profileDir)
+  },
   /** Binary dahil dosyayı userData/bin altına yaz */
   saveToolFile: (fileName: string, base64: string): Promise<string> =>
-    ipcRenderer.invoke('tools:saveFile', fileName, base64),
-  /** Yüzen IDMS paneli (video/ses üzerine binen pencere) */
-  float: {
-    state: (): Promise<FloatPanelState | null> => ipcRenderer.invoke('float:state'),
-    action: (action: FloatAction): Promise<{ ok: boolean; message?: string }> =>
-      ipcRenderer.invoke('float:action', action),
-    onMedia: (cb: (state: FloatPanelState) => void) => subscribe('float:media', cb),
-    onStatus: (cb: (status: { message: string; tone: 'info' | 'error' | 'success' }) => void) =>
-      subscribe('float:status', cb)
-  }
+    ipcRenderer.invoke('tools:saveFile', fileName, base64)
 }
 
 export type ExtendedApi = IpcApi & typeof extra
 
+/** IDM tarzı indirme pencerelerinin (add/progress/complete/duplicate) API'si */
+const dlwin: DownloadWindowApi = {
+  state: () => ipcRenderer.invoke('dlwin:state') as Promise<DownloadWindowState>,
+  action: (action: DownloadWindowAction) => ipcRenderer.invoke('dlwin:action', action),
+  onUpdate: (cb: (state: DownloadWindowState) => void) => subscribe('dlwin:update', cb)
+}
+
 contextBridge.exposeInMainWorld('idms2', { ...api, ...extra })
+contextBridge.exposeInMainWorld('dlwin', dlwin)

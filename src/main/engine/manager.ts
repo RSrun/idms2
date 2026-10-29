@@ -73,7 +73,9 @@ export class DownloadManager extends EventEmitter {
     name?: string
     savePath?: string
     category?: CategoryId
+    description?: string
     silent?: boolean
+    start?: boolean
     kind?: DownloadKind
     headers?: Record<string, string>
     totalBytes?: number | null
@@ -105,6 +107,8 @@ export class DownloadManager extends EventEmitter {
       pageUrl: req.pageUrl,
       savePath,
       category,
+      description: req.description,
+      supportsRange,
       state: 'queued',
       progress: {
         percent: 0,
@@ -117,6 +121,9 @@ export class DownloadManager extends EventEmitter {
       createdAt: Date.now()
     }
     this.items.unshift(item)
+    if (req.supportsRange !== undefined) this.rangeSupport.set(id, supportsRange)
+    if (req.headers && Object.keys(req.headers).length > 0) this.extraHeaders.set(id, req.headers)
+    if (req.start === false) this.deferredStart.add(id)
 
     const wantsConfirm = !req.silent && settings.general.confirmBeforeDownload
     if (wantsConfirm) {
@@ -126,15 +133,36 @@ export class DownloadManager extends EventEmitter {
     this.persist()
     this.emitUpdate()
 
-    // URL bilgisi yoksa arka planda çözümlenir (medya/ses için)
-    if (!totalBytes) {
+    // URL bilgisi yoksa arka planda çözümlenir (medya/ses için).
+    // yt-dlp işlerinde URL bir sayfa adresi: boyut/başlık yt-dlp'den gelir.
+    if (!totalBytes && req.kind !== 'media') {
       void this.resolveInfo(item)
     }
 
-    if (!wantsConfirm && settings.general.autoStart) {
+    if (req.kind !== 'media' && !wantsConfirm && settings.general.autoStart && req.start !== false) {
       this.schedulePump()
     }
     return item
+  }
+
+  /** Aynı URL'ye ait (iptal edilmemiş) mevcut kaydı bulur. */
+  findDuplicate(url: string): DownloadItem | undefined {
+    const target = url.trim()
+    return this.items.find((i) => i.url.trim() === target && i.state !== 'canceled')
+  }
+
+  /** İlerleme penceresi için canlı segment anlık görüntüsü. */
+  snapshotSegments(id: string): SegmentState[] {
+    const job = this.jobs.get(id)
+    if (job) return job.snapshot()
+    return this.pausedSnapshots.get(id) ?? []
+  }
+
+  /** Sunucunun Range desteği biliniyorsa döndürür. */
+  supportsRangeFor(id: string): boolean | undefined {
+    const item = this.get(id)
+    if (item?.supportsRange !== undefined) return item.supportsRange
+    return this.rangeSupport.get(id)
   }
 
   /** URL hakkında başlık/boyut/Range bilgisini arka planda çözer. */
@@ -160,6 +188,7 @@ export class DownloadManager extends EventEmitter {
         item.savePath = uniquePath(join(dirname(item.savePath), resolvedName))
       }
       this.holdRange(item, probe.supportsRange)
+      item.supportsRange = probe.supportsRange
     }
     // Çözümleme hatası durumunda mevcut durum korunur; indirme denemesinde anlaşılır
     if (item.state === 'resolving') {
@@ -167,10 +196,14 @@ export class DownloadManager extends EventEmitter {
     }
     this.persist()
     this.emitUpdate()
-    if (item.state === 'queued') this.schedulePump()
+    if (item.state === 'queued' && !this.deferredStart.has(item.id)) this.schedulePump()
   }
 
   private rangeSupport = new Map<string, boolean>()
+  /** Yalnızca bu oturum için ek HTTP başlıkları (ör. eklentiden gelen çerez) */
+  private extraHeaders = new Map<string, Record<string, string>>()
+  /** "Daha sonra indir" seçilen kayıtlar: çözümleme bitince kendiliğinden başlamaz. */
+  private deferredStart = new Set<string>()
 
   private holdRange(item: DownloadItem, supportsRange: boolean): void {
     this.rangeSupport.set(item.id, supportsRange)
@@ -185,6 +218,8 @@ export class DownloadManager extends EventEmitter {
    */
   async confirm(id: string, savePath?: string, start = true): Promise<DownloadItem> {
     const item = this.must(id)
+    if (start) this.deferredStart.delete(id)
+    else this.deferredStart.add(id)
     if (savePath && savePath !== item.savePath) {
       item.savePath = savePath
       item.name = basename(savePath)
@@ -199,6 +234,7 @@ export class DownloadManager extends EventEmitter {
 
   start(id: string): void {
     const item = this.must(id)
+    this.deferredStart.delete(id)
     if (item.state === 'completed' || item.state === 'downloading') return
     if (item.state === 'error') {
       item.errorMessage = undefined
@@ -280,6 +316,7 @@ export class DownloadManager extends EventEmitter {
     item.state = 'canceled'
     item.progress.speed = 0
     item.progress.connections = 0
+    this.deferredStart.delete(id)
     this.persist()
     this.emitUpdate()
     this.schedulePump()
@@ -301,6 +338,8 @@ export class DownloadManager extends EventEmitter {
     }
     this.items = this.items.filter((i) => i.id !== id)
     this.pausedSnapshots.delete(id)
+    this.deferredStart.delete(id)
+    this.extraHeaders.delete(id)
     this.persist()
     this.emitUpdate()
     this.schedulePump()
@@ -478,7 +517,9 @@ export class DownloadManager extends EventEmitter {
     if (active.length >= limit) return
 
     const candidates = this.items
-      .filter((i) => i.state === 'queued')
+      .filter(
+        (i) => i.state === 'queued' && i.kind !== 'media' && !this.deferredStart.has(i.id)
+      )
       .sort((a, b) => a.createdAt - b.createdAt)
 
     for (const item of candidates) {
@@ -528,6 +569,7 @@ export class DownloadManager extends EventEmitter {
         supportsRange = probe.supportsRange
         item.progress.totalBytes = totalBytes
         this.rangeSupport.set(item.id, supportsRange)
+        item.supportsRange = supportsRange
         if (probe.name && (!item.name || item.name === 'download')) {
           item.name = probe.name
         }
@@ -553,6 +595,7 @@ export class DownloadManager extends EventEmitter {
         supportsRange,
         segments: Math.max(1, segments),
         pageUrl: item.pageUrl,
+        headers: this.extraHeaders.get(item.id),
         speedLimitBps: speedLimitMbps > 0 ? speedLimitMbps * 1024 * 1024 : 0
       },
       {
