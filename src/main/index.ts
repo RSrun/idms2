@@ -1293,6 +1293,7 @@ function registerIpc(): void {
       }
 
       case 'add-cancel':
+        if (ctx.mode !== 'add') break
         settleFlows(pendingAddFlows, ctx.request.url, null)
         downloadWindows.closeForWebContents(e.sender.id)
         break
@@ -1398,6 +1399,7 @@ function registerIpc(): void {
       }
 
       case 'duplicate-cancel':
+        if (ctx.mode !== 'duplicate') break
         settleFlows(pendingDupFlows, ctx.existingId, null)
         settleFlows(pendingAddFlows, ctx.request.url, null)
         downloadWindows.closeForWebContents(e.sender.id)

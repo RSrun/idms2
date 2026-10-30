@@ -56,7 +56,7 @@ npm run start      # derlenmiş sürümü çalıştır
 npm run typecheck  # tsc --noEmit (main + renderer)
 npm run icons      # prosedürel PNG ikonlarını üretir (build/resources/icon.png)
 npm run ext        # extension/shared → chromium + firefox + gecko hedeflerini sıfırdan üretir
-npm run dist       # ikon + eklenti + electron-builder ile Windows NSIS kurucusu
+npm run dist       # derleme + ikon + eklenti + electron-builder ile Windows NSIS kurucusu
 ```
 
 ### Motor testleri (Electron gerekmez)

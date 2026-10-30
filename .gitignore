@@ -1,9 +1,12 @@
 node_modules/
 out/
 dist/
+dist*/
 release/
 *.log
+*.tsbuildinfo
+test-results/
+playwright-report/
+tests/.build/
 .DS_Store
 userData/
-
-

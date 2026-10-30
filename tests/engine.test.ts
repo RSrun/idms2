@@ -708,48 +708,42 @@ async function main() {
     String(newToken.status)
   )
 
-  // --- Hatalı kod ---
-  const ws1 = new WebSocket(`ws://127.0.0.1:${ext.status.port}`)
-  const msgs1 = []
-  await new Promise((res, rej) => {
-    ws1.on('message', (d) => {
-      msgs1.push(JSON.parse(d.toString()))
-      if (msgs1.length >= 2) res()
+  // --- WS: token zorunlu; eşleştirme yalnızca HTTP /pair ile ---
+  const wsStatus = (ws: any) =>
+    new Promise<number>((res) => {
+      ws.on('open', () => res(200))
+      ws.on('unexpected-response', (_req: any, r: any) => res(r.statusCode || 0))
+      ws.on('error', () => res(-1))
+      setTimeout(() => res(-1), 3000)
     })
-    ws1.on('error', rej)
-    ws1.on('open', () =>
-      ws1.send(JSON.stringify({ t: 'hello', client: 'TestBrowser', version: '9.9.9', pairingCode: 'WRONG1' }))
-    )
-  })
-  const welcome1 = msgs1.find((m) => m.t === 'welcome')
-  ok('welcome geldi', !!welcome1)
-  ok('yanlış kodda paired=false', welcome1 && welcome1.paired === false)
-  ok('pairingCode gönderildi', welcome1 && welcome1.pairingCode === 'TEST01')
 
-  // Eşleştirilmemişken indirme denemesi reddedilir
-  ws1.send(JSON.stringify({ t: 'download', url: `${base}/small.txt` }))
-  const reject = await new Promise((res) => {
-    const h = (d) => {
-      const m = JSON.parse(d.toString())
-      if (m.t === 'ack' && m.ok === false) {
-        ws1.off('message', h)
-        res(m)
-      }
-    }
-    ws1.on('message', h)
-  })
-  ok('eşleştirilmeden indirme reddedilir', /eşleştirme/.test(reject.message || ''), reject.message)
-  ws1.close()
-  await sleep(200)
+  const wsNoToken = new WebSocket(`ws://127.0.0.1:${ext.status.port}`)
+  ok('tokensiz WS 401 ile reddedilir', (await wsStatus(wsNoToken)) === 401)
+  try {
+    wsNoToken.terminate()
+  } catch {
+    /* zaten kapalı */
+  }
 
-  // --- Doğru kod ---
-  const ws2 = new WebSocket(`ws://127.0.0.1:${ext.status.port}`)
+  const wsBadOrigin = new WebSocket(
+    `ws://127.0.0.1:${ext.status.port}/?token=${encodeURIComponent(token)}`,
+    { origin: WEB_ORIGIN }
+  )
+  ok('token olsa da eklenti dışı köken 403', (await wsStatus(wsBadOrigin)) === 403)
+  try {
+    wsBadOrigin.terminate()
+  } catch {
+    /* zaten kapalı */
+  }
+
+  // --- Token + eklenti kökeni: eşleşmiş istemci ---
+  const ws2 = new WebSocket(
+    `ws://127.0.0.1:${ext.status.port}/ws?token=${encodeURIComponent(token)}&client=Chrome&version=131.0`,
+    { origin: EXT_ORIGIN }
+  )
   const msgs2 = []
   ws2.on('message', (d) => msgs2.push(JSON.parse(d.toString())))
-  await new Promise((res, rej) => {
-    ws2.on('open', () =>
-      ws2.send(JSON.stringify({ t: 'hello', client: 'Chrome', version: '131.0', pairingCode: 'TEST01' }))
-    )
+  await new Promise<void>((res, rej) => {
     ws2.on('error', rej)
     const iv = setInterval(() => {
       if (msgs2.some((m) => m.t === 'welcome' && m.paired)) {
@@ -763,20 +757,21 @@ async function main() {
     }, 3000)
   })
   const welcome2 = msgs2.find((m) => m.t === 'welcome' && m.paired)
-  ok('doğru kodla paired=true', !!welcome2)
+  ok('welcome geldi (token ile)', !!welcome2)
+  ok('token ile paired=true', welcome2?.paired === true)
+  ok(
+    'welcome eşleştirme kodu sızdırmaz',
+    msgs2.every((m) => m.pairingCode === undefined)
+  )
   ok('sunucu tarafında paired sayıldı', ext.status.paired === true)
   ok('istemci listelendi', ext.status.clients.length === 1 && ext.status.clients[0].client === 'Chrome')
 
   // --- Sayfa içi yüzen panel köprüsü: eşleşme + eklenti kökeni gerekir ---
-  const wsFloat = new WebSocket(`ws://127.0.0.1:${ext.status.port}`, {
-    origin: 'chrome-extension://abcdefghijklmnop'
-  })
+  const wsFloat = new WebSocket(
+    `ws://127.0.0.1:${ext.status.port}/ws?token=${encodeURIComponent(token)}&client=FloatBrowser&version=1.2.0`,
+    { origin: EXT_ORIGIN }
+  )
   await new Promise<void>((res, rej) => {
-    wsFloat.on('open', () =>
-      wsFloat.send(
-        JSON.stringify({ t: 'hello', client: 'FloatBrowser', version: '1.2.0', pairingCode: 'TEST01' })
-      )
-    )
     wsFloat.on('message', (d) => {
       const m = JSON.parse(d.toString())
       if (m.t === 'welcome' && m.paired === true) res()
@@ -866,27 +861,9 @@ async function main() {
   wsFloat.close()
   await sleep(150)
 
-  // Kökensiz (web sayfası) eşleşmiş bağlantı panel isteği gönderemez
-  const denied = await new Promise<any>((res) => {
-    const h = (d: any) => {
-      const m = JSON.parse(d.toString())
-      if (m.t === 'ack' && m.ok === false) {
-        ws2.off('message', h)
-        res(m)
-      }
-    }
-    ws2.on('message', h)
-    ws2.send(JSON.stringify({ t: 'float-formats', media: floatMedia }))
-    setTimeout(() => {
-      ws2.off('message', h)
-      res(null)
-    }, 2500)
-  })
-  ok(
-    'eklenti dışı kökende panel isteği reddedilir',
-    !!denied && /köken/.test(denied.message || ''),
-    denied?.message
-  )
+  // Eklenti dışı köken el sıkışmada (403) reddedildiği için panel isteği
+  // gönderebilecek eşleşmiş bir web istemcisi yoktur; bu yüzden ayrı bir
+  // "kökensiz panel isteği" senaryosu kurulmaz.
 
   // --- İndirme isteği ---
   const beforeDl = mgrExt.list().length
