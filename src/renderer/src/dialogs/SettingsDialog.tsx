@@ -804,13 +804,6 @@ function ExtensionTab({
   )
 }
 
-function extensionDir(): string {
-  // Dev'de __dirname kullanılır; üretimde Electron'dan gerçek dizin alınır
-  const isDev = !!(window as any).idms2;
-  if (isDev && (window as any).__dirname) return (window as any).__dirname + '/extension';
-  return 'extension'; // Üretimde openPath('ext:dir') ile gerçek yol açılır
-}
-
 /* ============================ HAKKINDA ============================ */
 
 function AboutTab({ version }: { version: string }) {

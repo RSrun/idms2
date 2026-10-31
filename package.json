@@ -1,7 +1,7 @@
 {
   "name": "idms",
   "productName": "IDMS",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "IDM benzeri indirme yöneticisi: torrent, tarayıcı eklentisi, sosyal medya indirme ve bildirimler",
   "main": "out/main/index.js",
   "type": "module",

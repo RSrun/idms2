@@ -32,36 +32,6 @@ export type CategoryId =
   | 'other'
 
 /** Tarayıcı eklentisinden gelen / uygulamanın verdiği medya kaynağı */
-export interface MediaCandidate {
-  /** Benzersiz anahtar (url + format) */
-  id: string
-  url: string
-  /** Sayfa URL'si (Referer / cookies için) */
-  pageUrl?: string
-  title?: string
-  container?: string
-  quality?: string
-  fps?: number
-  /** Byte cinsinden; bilinmiyorsa null */
-  sizeBytes?: number | null
-  /** tadyen onaylanmadıysa true */
-  needsConfirm?: boolean
-}
-
-/** Eklentinin sayfada bulduğu indirilebilir öğeler */
-export interface DetectedMedia {
-  id: string
-  kind: 'video' | 'audio' | 'file'
-  url: string
-  title: string
-  pageUrl: string
-  /** Örn. "video/mp4" */
-  mime?: string
-  sizeBytes?: number | null
-  /** Video elementindeki mevcut süre (saniye) */
-  duration?: number
-}
-
 export interface DownloadProgress {
   /** 0..1 */
   percent: number
@@ -411,6 +381,8 @@ export type DownloadWindowAction =
   | { type: 'progress-pause' }
   | { type: 'progress-resume' }
   | { type: 'progress-cancel' }
+  | { type: 'progress-open-file' }
+  | { type: 'progress-open-folder' }
   | { type: 'complete-open'; dontShowAgain?: boolean }
   | { type: 'complete-open-with'; dontShowAgain?: boolean }
   | { type: 'complete-folder'; dontShowAgain?: boolean }

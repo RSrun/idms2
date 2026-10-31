@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { AppToast, CategoryId, DownloadItem } from '@shared/types'
+import type { AppToast, CategoryId, CookieRecord, DownloadItem } from '@shared/types'
 import { useAppState } from './state'
 import { useT, setLang } from './i18n'
 import { formatBytes, formatSpeed, iconFor } from './format'
@@ -18,7 +18,14 @@ const api = () => window.idms2
 
 export type DialogKind =
   | { kind: 'none' }
-  | { kind: 'media'; url: string; pageUrl?: string; title?: string }
+  | {
+      kind: 'media'
+      url: string
+      pageUrl?: string
+      title?: string
+      /** Eklentinin sayfadan topladığı oturum çerezleri (Reddit/Instagram) */
+      cookies?: CookieRecord[]
+    }
   | { kind: 'torrent' }
   | { kind: 'settings'; tab?: string }
 
@@ -69,7 +76,8 @@ export default function App() {
         kind: 'media',
         url: media.url,
         pageUrl: media.pageUrl,
-        title: media.title
+        title: media.title,
+        cookies: media.cookies
       })
     })
   }, [])
@@ -227,6 +235,9 @@ export default function App() {
                 case 'remove':
                   void a.removeDownload(id, false)
                   break
+                case 'details':
+                  void a.openProgressWindow(id)
+                  break
                 case 'open': {
                   const it = st.downloads.find((d) => d.id === id)
                   if (it?.savePath) void a.openPath(it.savePath)
@@ -279,6 +290,7 @@ export default function App() {
           url={dialog.url}
           pageUrl={dialog.pageUrl}
           initialTitle={dialog.title}
+          cookies={dialog.cookies}
           onClose={() => setDialog({ kind: 'none' })}
           onDownloaded={(id) => setSelected(id)}
         />

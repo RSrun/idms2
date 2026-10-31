@@ -332,8 +332,3 @@ export function uninstallGeckoExtension(profileDir: string): void {
   rmSync(join(extensionsDir, GECKO_ADDON_ID), { recursive: true, force: true })
   removeInstallPrefs(profileDir)
 }
-
-/** Test/CLI için: verilen profilde eklenti kurulu mu? */
-export function isGeckoExtensionInstalled(profileDir: string): boolean {
-  return existsSync(join(profileDir, 'extensions', GECKO_XPI))
-}

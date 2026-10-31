@@ -99,6 +99,9 @@ const extra = {
   /** IDM tarzı "Dosya İndirme Bilgisi" penceresini aç */
   openAddDownloadWindow: (url?: string): Promise<void> =>
     ipcRenderer.invoke('dlwin:openAdd', url),
+  /** İndirme ayrıntı/ilerleme panelini aç (listedeki çift tıklama) */
+  openProgressWindow: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke('dlwin:openProgress', id),
   /** URL kontrolü (probe) tipi */
   probe: (url: string, pageUrl?: string): Promise<UrlProbeResult> =>
     ipcRenderer.invoke('downloads:probe', url, pageUrl),
@@ -124,9 +127,6 @@ const extra = {
     ipcRenderer.invoke('tools:saveFile', fileName, base64)
 }
 
-export type ExtendedApi = IpcApi & typeof extra
-
-/** IDM tarzı indirme pencerelerinin (add/progress/complete/duplicate) API'si */
 const dlwin: DownloadWindowApi = {
   state: () => ipcRenderer.invoke('dlwin:state') as Promise<DownloadWindowState>,
   action: (action: DownloadWindowAction) => ipcRenderer.invoke('dlwin:action', action),

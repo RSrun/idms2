@@ -1,7 +1,7 @@
 import { request as httpsRequest } from 'https'
 import { request as httpRequest } from 'http'
 import { createWriteStream, promises as fsp } from 'fs'
-import { dirname, join } from 'path'
+import { dirname } from 'path'
 import type { FileHandle } from 'fs/promises'
 import { buildDownloadHeaders } from './probe'
 
@@ -91,7 +91,6 @@ export class SegmentedJob {
   private activeRequests = 0
   private finished = false
   private errored = false
-  private paused = false
   private lastActivity = Date.now()
   private speedLimiter: { last: number; tokens: number } | null = null
   private progressTimer: ReturnType<typeof setInterval> | null = null
@@ -483,7 +482,6 @@ export class SegmentedJob {
 
   /** Kullanıcı duraklattı: istekleri durdur ve fd'yi kapat */
   pause(): SegmentState[] {
-    this.paused = true
     const snap = this.snapshot()
     this.abort.abort()
     this.cleanup()

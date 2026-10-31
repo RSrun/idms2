@@ -70,13 +70,6 @@ export interface YtdlpOptions {
   forceOverwrite?: boolean
 }
 
-export interface RunOptions {
-  args: string[]
-  onLine?: (line: string) => void
-  signal?: AbortSignal
-  timeoutMs?: number
-}
-
 const BASE_ARGS = [
   '--no-warnings',
   '--no-playlist',
@@ -218,7 +211,6 @@ export async function writeCookieFile(
     const domain = c.domain || ''
     const includeSub = domain.startsWith('.') ? 'TRUE' : 'FALSE'
     const secure = c.secure ? 'TRUE' : 'FALSE'
-    const httpOnly = c.httpOnly ? 'TRUE' : 'FALSE'
     const expiry = Math.floor(c.expirationDate || Math.floor(Date.now() / 1000) + 86400 * 30)
     const path = c.path || '/'
     if (!c.name || c.value === undefined) continue

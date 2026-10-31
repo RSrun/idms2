@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
-import { existsSync, readFileSync, writeFileSync, promises as fsp } from 'fs'
+import { existsSync, readFileSync, promises as fsp } from 'fs'
 import { join } from 'path'
-import { app, BrowserWindow } from 'electron'
+import { app } from 'electron'
 import WebTorrent from 'webtorrent'
 import type { DownloadItem } from '@shared/types'
 import type { Store } from './store'
@@ -13,6 +13,8 @@ interface ActiveTorrent {
   torrent: Torrent
   savePath: string
   magnetOrPath: string
+  /** Uygulama tarafından duraklatıldı mı (webtorrent bayrağından bağımsız) */
+  paused: boolean
 }
 
 /**
@@ -146,7 +148,7 @@ export class TorrentManager extends EventEmitter {
   /** Torrenti etkin listeye alır, ilerleme olaylarını bağlar. */
   private track(torrent: Torrent, savePath: string, magnetOrPath: string): string {
     const id = `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-    const entry: ActiveTorrent = { id, torrent, savePath, magnetOrPath: String(magnetOrPath) }
+    const entry: ActiveTorrent = { id, torrent, savePath, magnetOrPath: String(magnetOrPath), paused: false }
     this.active.set(id, entry)
 
     // İlerleme yayınlarını dinle
@@ -163,12 +165,16 @@ export class TorrentManager extends EventEmitter {
 
   private snapshot(entry: ActiveTorrent): Partial<DownloadItem['torrent']> & { name: string; progress: number } {
     const t = entry.torrent
+    // Duraklatılmış torrent'te webtorrent'in hız ölçerleri son 5 saniyenin
+    // ortalamasını döndürür; ayrıca bağlantılar kapatıldığı için yeni olay
+    // gelmez ve arayüzde donmuş bir hız kalır. Duraklatıldıysa sıfır bildir.
+    const paused = entry.paused || t.paused
     return {
       name: t.name || 'torrent',
       progress: t.progress || 0,
-      peers: t.numPeers || 0,
-      downloadSpeed: t.downloadSpeed || 0,
-      uploadSpeed: t.uploadSpeed || 0,
+      peers: paused ? 0 : t.numPeers || 0,
+      downloadSpeed: paused ? 0 : t.downloadSpeed || 0,
+      uploadSpeed: paused ? 0 : t.uploadSpeed || 0,
       ratio: t.ratio || 0,
       totalBytes: t.length || 0,
       downloadedBytes: Math.round((t.progress || 0) * (t.length || 0))
@@ -185,16 +191,60 @@ export class TorrentManager extends EventEmitter {
     return entry ? entry.torrent.name || null : null
   }
 
+  /**
+   * Torrent'i duraklat.
+   *
+   * webtorrent'in `pause()`'u yalnızca **yeni** eş eklenmesini engeller; açık
+   * bağlantılar indirmeye/yüklemeye devam eder. Gerçekten durmak için mevcut
+   * eş bağlantıları da kapatılır.
+   */
   pause(id: string): void {
-    this.active.get(id)?.torrent.pause()
-    this.emit('progress', id, this.snapshot(this.active.get(id)!))
+    const entry = this.active.get(id)
+    if (!entry) return
+    entry.paused = true
+    entry.torrent.pause()
+    this.dropWires(entry.torrent)
+    this.emit('progress', id, this.snapshot(entry))
   }
 
+  /** Duraklatılan torrent'i sürdür; tracker/DHT'e hemen yeniden duyur. */
   resume(id: string): void {
     const entry = this.active.get(id)
     if (!entry) return
+    entry.paused = false
     entry.torrent.resume()
+    this.reannounce(entry.torrent)
     this.emit('progress', id, this.snapshot(entry))
+  }
+
+  /** Açık eş bağlantılarını kapat (duraklatma gerçekten trafiği kessin). */
+  private dropWires(torrent: Torrent): void {
+    const wires = ((torrent as any).wires || []) as Array<{ destroy?: () => void }>
+    for (const wire of [...wires]) {
+      try {
+        wire.destroy?.()
+      } catch {
+        /* yoksay */
+      }
+    }
+  }
+
+  /** Sürdürmede eş bulmayı hızlandır: tracker güncellemesi + DHT duyurusu. */
+  private reannounce(torrent: Torrent): void {
+    const discovery = (torrent as any).discovery
+    if (!discovery) return
+    try {
+      discovery.tracker?.update?.()
+    } catch {
+      /* yoksay */
+    }
+    try {
+      if (discovery.dht && discovery._port) {
+        discovery.dht.announce(torrent.infoHash, discovery._port, () => undefined)
+      }
+    } catch {
+      /* yoksay */
+    }
   }
 
   /** Torrenti listeden kaldır; deleteData=true ise dosyaları da siler. */
@@ -222,8 +272,10 @@ export class TorrentManager extends EventEmitter {
   tick(): void {
     const limit = this.store.getSettings().torrent.seedRatioLimit
     for (const [id, entry] of this.active) {
+      if (entry.paused) continue
       if (limit > 0 && entry.torrent.done && entry.torrent.ratio >= limit) {
-        entry.torrent.pause()
+        // Yalnızca pause() yetmez: açık eş bağlantıları da kapatılmalı
+        this.pause(id)
         this.emit('seed-limit', id, this.snapshot(entry))
       }
     }

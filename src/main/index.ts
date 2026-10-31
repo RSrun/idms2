@@ -7,8 +7,7 @@ import {
   clipboard,
   Tray,
   Menu,
-  nativeImage,
-  protocol
+  nativeImage
 } from 'electron'
 import { join, dirname, basename, extname } from 'path'
 import { spawn } from 'child_process'
@@ -33,7 +32,6 @@ import type {
   FloatFormat,
   FloatMediaInfo,
   GeckoInstallResult,
-  IpcApi,
   MediaDownloadRequest,
   Settings
 } from '@shared/types'
@@ -63,7 +61,7 @@ import {
   type FloatProbeResult
 } from './floatFormats'
 import { fillFormatSizes } from './floatSizes'
-import { setLanguage, t, formatBytes, formatSpeed } from './lang'
+import { setLanguage, t } from './lang'
 
 // ---------------------------------------------------------------------------
 // Kullanıcı verisi klasörü
@@ -292,6 +290,7 @@ function wireNotifier(): void {
     const item = manager.get(id)
     // Medya kaydı HTTP motoruna düşmemeli: yt-dlp yeniden koşar
     if (item?.kind === 'media') return retryMediaDownload(item)
+    if (item?.kind === 'torrent') return void resumeTorrent(item)
     manager.start(id)
   })
 }
@@ -545,7 +544,9 @@ function runMediaDownload(
         // Duraklatma da süreci sonlandırır; durumu manager belirlediyse koru
         if (manager.get(id)?.state === 'downloading') manager.externalState(id, 'canceled')
       } else {
-        manager.externalError(id, msg)
+        // Bilinen yt-dlp hataları (oturum, erişim, istek sınırı) çevrilmiş görünür
+        const known = classifyProbeError(msg)
+        manager.externalError(id, known ? mediaErrorNote(msg) : msg)
       }
     } finally {
       mediaControllers.delete(id)
@@ -850,6 +851,26 @@ function probeErrorNote(raw?: string): string {
   switch (classifyProbeError(raw)) {
     case 'login':
       return t('float.needLogin')
+    case 'unsupported':
+      return t('float.pageNotSpecific')
+    case 'rateLimit':
+      return t('float.rateLimit')
+    case 'unavailable':
+      return t('float.unavailable')
+    default:
+      return t('float.probeFailed')
+  }
+}
+
+/**
+ * Medya penceresi için sürüm: giriş gerektiren içerikte çerez ayarını
+ * doğrudan hatırlatır. Ham yt-dlp metni kullanıcıya gösterilmez.
+ */
+function mediaErrorNote(raw?: string): string {
+  if (raw) console.warn('[yt-dlp] medya:', raw)
+  switch (classifyProbeError(raw)) {
+    case 'login':
+      return t('media.needsCookies')
     case 'unsupported':
       return t('float.pageNotSpecific')
     case 'rateLimit':
@@ -1282,6 +1303,14 @@ function registerIpc(): void {
   /* --- IDM tarzı indirme pencereleri --- */
   ipcMain.handle('dlwin:openAdd', (_e, url?: string) => openAddDownloadWindow(url))
 
+  // Listeden çift tıklama: indirme ayrıntı/ilerleme panelini aç
+  ipcMain.handle('dlwin:openProgress', (_e, id: string) => {
+    const item = manager.get(id)
+    if (!item) return false
+    downloadWindows.openProgress(item.id)
+    return true
+  })
+
   ipcMain.handle('dlwin:state', (e) => {
     const ctx = downloadWindows.contextFor(e.sender.id)
     return ctx ? downloadWindows.stateFor(ctx) : null
@@ -1298,7 +1327,7 @@ function registerIpc(): void {
         // "Bu kategori için bu yolu hatırla" (pencere ayrıca kendisi de yazar)
         if (action.remember && action.request.savePath && action.request.category) {
           const current = store.getSettings()
-          const next = store.patchSettings({
+          store.patchSettings({
             general: {
               categoryDirs: {
                 ...(current.general.categoryDirs || {}),
@@ -1332,6 +1361,8 @@ function registerIpc(): void {
         if (ctx.mode !== 'progress') break
         const item = manager.get(ctx.itemId)
         if (item?.kind === 'media') mediaControllers.get(item.id)?.abort()
+        // Torrent'ler HTTP motorunda değil; asıl trafiği webtorrent taşır
+        if (item?.kind === 'torrent') pauseTorrentFor(item.id)
         try {
           manager.pause(ctx.itemId)
         } catch {
@@ -1345,6 +1376,7 @@ function registerIpc(): void {
         const item = manager.get(ctx.itemId)
         if (!item) break
         if (item.kind === 'media') retryMediaDownload(item)
+        else if (item.kind === 'torrent') void resumeTorrent(item)
         else manager.resume(item.id)
         break
       }
@@ -1352,6 +1384,7 @@ function registerIpc(): void {
       case 'progress-cancel': {
         if (ctx.mode !== 'progress') break
         mediaControllers.get(ctx.itemId)?.abort()
+        if (manager.get(ctx.itemId)?.kind === 'torrent') pauseTorrentFor(ctx.itemId)
         try {
           manager.cancel(ctx.itemId)
         } catch {
@@ -1361,8 +1394,26 @@ function registerIpc(): void {
         break
       }
 
+      case 'progress-open-file': {
+        if (ctx.mode !== 'progress') break
+        const item = manager.get(ctx.itemId)
+        if (!item?.savePath) break
+        // Dosya yerinde yoksa klasörünü aç (silinmiş/taşınmış olabilir)
+        await shell.openPath(existsSync(item.savePath) ? item.savePath : dirname(item.savePath))
+        break
+      }
+
+      case 'progress-open-folder': {
+        if (ctx.mode !== 'progress') break
+        const item = manager.get(ctx.itemId)
+        if (!item?.savePath) break
+        if (existsSync(item.savePath)) shell.showItemInFolder(item.savePath)
+        else await shell.openPath(dirname(item.savePath))
+        break
+      }
+
       case 'set-speed-limit': {
-        const next = store.patchSettings({
+        store.patchSettings({
           general: { speedLimitMbps: Math.max(0, Number(action.mbps) || 0) }
         })
         sendToRenderer('settings', publicSettings())
@@ -1371,7 +1422,7 @@ function registerIpc(): void {
       }
 
       case 'set-complete-window': {
-        const next = store.patchSettings({
+        store.patchSettings({
           notifications: { completeWindow: action.value }
         })
         sendToRenderer('settings', publicSettings())
@@ -1385,7 +1436,7 @@ function registerIpc(): void {
       case 'complete-close': {
         if (ctx.mode !== 'complete') break
         if (action.dontShowAgain) {
-          const next = store.patchSettings({
+          store.patchSettings({
             notifications: { completeWindow: false }
           })
           sendToRenderer('settings', publicSettings())
@@ -1398,7 +1449,7 @@ function registerIpc(): void {
       case 'duplicate-choose': {
         if (ctx.mode !== 'duplicate') break
         if (action.remember) {
-          const next = store.patchSettings({
+          store.patchSettings({
             general: { duplicatePolicy: action.choice }
           })
           sendToRenderer('settings', publicSettings())
@@ -1454,29 +1505,50 @@ function registerIpc(): void {
     const item = manager.get(id)
     // Medya kayıtları HTTP motoruna düşmemeli: yt-dlp yeniden koşar
     if (item?.kind === 'media') return retryMediaDownload(item)
+    // Torrent kayıtları da HTTP motoruna girmemeli: webtorrent tarafını sürdür
+    if (item?.kind === 'torrent') return resumeTorrent(item)
     manager.start(id)
   })
   ipcMain.handle('downloads:pause', (_e, id: string) => {
     mediaControllers.get(id)?.abort()
+    // Torrent'ler HTTP motorunda değil; webtorrent tarafını da durdur
+    pauseTorrentFor(id)
     manager.pause(id)
   })
   ipcMain.handle('downloads:queue', (_e, id: string) => {
     const item = manager.get(id)
     // Medya indirmeleri HTTP kuyruğuna girmez
     if (item?.kind === 'media') return item
+    // Torrent'ler kuyruğa alınmaz: kuyruk = duraklat (aksini yaparsak pompa
+    // magnet adresini HTTP ile indirmeye çalışır)
+    if (item?.kind === 'torrent') {
+      pauseTorrentFor(id)
+      manager.pause(id)
+      return manager.get(id) ?? item
+    }
     return manager.queue(id)
   })
-  ipcMain.handle('downloads:resume', (_e, id: string) => {
+  ipcMain.handle('downloads:resume', async (_e, id: string) => {
     const item = manager.get(id)
-    if (item?.kind === 'media') return retryMediaDownload(item)
+    if (!item) return
+    if (item.kind === 'media') return retryMediaDownload(item)
+    if (item.kind === 'torrent') return resumeTorrent(item)
     manager.resume(id)
   })
   ipcMain.handle('downloads:cancel', (_e, id: string) => {
     mediaControllers.get(id)?.abort()
+    // Torrent: trafiği kes ama kaydı koru (sonra devam edilebilsin)
+    pauseTorrentFor(id)
     manager.cancel(id)
   })
   ipcMain.handle('downloads:remove', (_e, id: string, deleteFile: boolean) => {
     mediaControllers.get(id)?.abort()
+    const torrentId = torrentIdFor(id)
+    if (torrentId) {
+      torrentLinks.delete(torrentId)
+      // Dizin silme/istemci bırakma torrent tarafında yapılır
+      void torrentMgr.remove(torrentId, deleteFile)
+    }
     return manager.remove(id, deleteFile)
   })
   ipcMain.handle('downloads:confirm', (_e, id: string, savePath?: string, start?: boolean) => {
@@ -1498,7 +1570,7 @@ function registerIpc(): void {
   })
 
   // --- Sosyal medya ---
-  ipcMain.handle('media:probe', async (_e, url: string, pageUrl?: string, cookies?: any[]) => {
+  ipcMain.handle('media:probe', async (_e, url: string, _pageUrl?: string, cookies?: any[]) => {
     const settings = store.getSettings()
     if (!locator.findYtdlp()) {
       return {
@@ -1510,12 +1582,15 @@ function registerIpc(): void {
         error: t('err.ytdlpMissing')
       }
     }
-    return ytdlp.probe({
+    const res = await ytdlp.probe({
       url,
       cookies,
       useCookies: settings.social.passCookies,
       impersonate: settings.social.impersonate
     })
+    // Ham yt-dlp metni arayüze çıkmasın; nota çevir, aslını günlüğe yaz
+    if (!res.ok && res.error) return { ...res, error: mediaErrorNote(res.error) }
+    return res
   })
 
   ipcMain.handle('media:download', (_e, req: MediaDownloadRequest) => startMediaDownload(req))
@@ -1635,6 +1710,42 @@ function registerIpc(): void {
 
 const torrentLinks = new Map<string, string>() // torrentId → downloadId
 
+/** İndirme kaydından ona bağlı torrent kimliğini bulur. */
+function torrentIdFor(downloadId: string): string | undefined {
+  for (const [torrentId, linkedId] of torrentLinks) {
+    if (linkedId === downloadId) return torrentId
+  }
+  return undefined
+}
+
+/** İndirmeye bağlı torrent varsa webtorrent tarafını duraklat. */
+function pauseTorrentFor(downloadId: string): void {
+  const torrentId = torrentIdFor(downloadId)
+  if (torrentId) torrentMgr.pause(torrentId)
+}
+
+/**
+ * Torrent indirmesini sürdürür. Kayıt tamamlanmışsa yalnızca seed edilir;
+ * istemcide torrent yoksa (uygulama yeniden açıldı) yeniden eklenir.
+ */
+async function resumeTorrent(item: DownloadItem): Promise<void> {
+  const torrentId = torrentIdFor(item.id)
+  if (item.state === 'completed') {
+    if (torrentId) torrentMgr.resume(torrentId)
+    return
+  }
+  if (torrentId) {
+    torrentMgr.resume(torrentId)
+  } else {
+    const source = item.torrent?.magnetOrPath || item.url
+    const dir = item.savePath ? dirname(item.savePath) : undefined
+    const added = await torrentMgr.add(source, dir)
+    torrentLinks.set(added.id, item.id)
+  }
+  // HTTP motorunu başlatma; durumu doğrudan 'downloading' yap
+  manager.externalStarted(item.id)
+}
+
 // ---------------------------------------------------------------------------
 // Torrent olaylarını indirme listesine yansıt
 // ---------------------------------------------------------------------------
@@ -1642,16 +1753,8 @@ function wireTorrents(): void {
   torrentMgr.on('progress', (torrentId: string, snap: any) => {
     const dlId = torrentLinks.get(torrentId)
     if (!dlId) return
-    manager.externalProgress(dlId, {
-      percent: snap.progress,
-      downloadedBytes: snap.downloadedBytes,
-      totalBytes: snap.totalBytes,
-      speed: snap.downloadSpeed,
-      etaSeconds:
-        snap.downloadSpeed > 0
-          ? Math.round((snap.totalBytes - snap.downloadedBytes) / snap.downloadSpeed)
-          : null
-    })
+    // Önce torrent alanlarını yaz: externalProgress kaydı arayüze yayınlıyor,
+    // eş/hız bilgisi yayından sonra yazılırsa arayüzde eski değer kalır.
     const item = manager.get(dlId)
     if (item?.torrent) {
       item.torrent.peers = snap.peers
@@ -1662,6 +1765,16 @@ function wireTorrents(): void {
       item.torrent.totalBytes = snap.totalBytes
       item.torrent.downloadedBytes = snap.downloadedBytes
     }
+    manager.externalProgress(dlId, {
+      percent: snap.progress,
+      downloadedBytes: snap.downloadedBytes,
+      totalBytes: snap.totalBytes,
+      speed: snap.downloadSpeed,
+      etaSeconds:
+        snap.downloadSpeed > 0
+          ? Math.round((snap.totalBytes - snap.downloadedBytes) / snap.downloadSpeed)
+          : null
+    })
   })
 
   torrentMgr.on('done', (torrentId: string) => {

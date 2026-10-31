@@ -68,6 +68,32 @@ try {
   check('ikinci ekleme aynı kimliği döndürür', second.id === first.id)
   check('etkin torrent sayısı 1 kalır', manager.running === 1)
   check('torrent adı okunur', manager.name(first.id) === 'ornek.txt')
+
+  // --- Duraklatma: hız/eş bilgisi sıfır bildirilmeli ---
+  const entry = [...manager.active.values()][0]
+  Object.defineProperty(entry.torrent, 'downloadSpeed', { get: () => 2310, configurable: true })
+  Object.defineProperty(entry.torrent, 'uploadSpeed', { get: () => 120, configurable: true })
+  Object.defineProperty(entry.torrent, 'numPeers', { get: () => 44, configurable: true })
+
+  const before = manager.getSnapshot(first.id)
+  check('duraklatmadan önce hız okunur', before.downloadSpeed === 2310)
+  check('duraklatmadan önce eş sayısı okunur', before.peers === 44)
+
+  let progressSnap = null
+  manager.on('progress', (id, snap) => {
+    if (id === first.id) progressSnap = snap
+  })
+
+  manager.pause(first.id)
+  check('duraklatınca torrent duraklatılır', entry.torrent.paused === true)
+  check('duraklatınca hız sıfırlanır', manager.getSnapshot(first.id).downloadSpeed === 0)
+  check('duraklatınca yükleme hızı sıfırlanır', manager.getSnapshot(first.id).uploadSpeed === 0)
+  check('duraklatınca eş sayısı sıfırlanır', manager.getSnapshot(first.id).peers === 0)
+  check('duraklatma olayı sıfır hız yayınlar', progressSnap?.downloadSpeed === 0)
+
+  manager.resume(first.id)
+  check('sürdürünce torrent devam eder', entry.torrent.paused === false)
+  check('sürdürünce hız yeniden okunur', manager.getSnapshot(first.id).downloadSpeed === 2310)
 } catch (err) {
   failed = true
   console.error('  ✗ beklenmeyen hata:', err?.stack || err)

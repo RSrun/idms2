@@ -1033,7 +1033,16 @@ async function main() {
     'oturum/çerez hatası tanınır',
     ff.classifyProbeError(
       'ERROR: [Instagram] Requested content is not available, rate-limit reached or login required'
-    ) === 'login' && ff.classifyProbeError('Sign in to confirm you are not a bot') === 'login'
+    ) === 'login' &&
+      ff.classifyProbeError('Sign in to confirm you are not a bot') === 'login' &&
+      ff.classifyProbeError(
+        'ERROR: [Reddit] 1xke97q: Account authentication is required. Use --cookies-from-browser or --cookies for the authentication.'
+      ) === 'login'
+  )
+  ok(
+    'saf istek sınırı hatası ayrı kalır',
+    ff.classifyProbeError('ERROR: HTTP Error 429: Too Many Requests') === 'rateLimit' &&
+      ff.classifyProbeError('This content isn\'t available, try again later') === 'rateLimit'
   )
   ok(
     'erişime kapalı içerik tanınır',

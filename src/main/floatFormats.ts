@@ -117,21 +117,24 @@ export function classifyProbeError(raw: string | null | undefined): ProbeErrorKi
   const text = String(raw || '').trim()
   if (!text) return null
   if (/unsupported url|is not a valid url/i.test(text)) return 'unsupported'
-  // YouTube'un istek sınırı/istemci engeli: video tarayıcıda oynasa bile
-  // liste alınamaz. "Video bulunamadı" demek yanıltıcı olur.
-  if (
-    /this content isn'?t available|try again later|rate.?limit|too many requests|\b429\b|page needs to be reloaded/i.test(
-      text
-    )
-  ) {
-    return 'rateLimit'
-  }
+  // Oturum/çerez gerektiren mesajlar önce gelir: Instagram/Reddit gibi siteler
+  // "rate-limit reached or login required" diyerek ikisini birlikte bildiriyor;
+  // bu durumda çözüm çerez olduğu için 'login' daha doğru yönlendirme.
   if (
     /log ?in|login required|sign in|cookie|authenticat|private|members[- ]only|age.?restrict|consent/i.test(
       text
     )
   ) {
     return 'login'
+  }
+  // İstemci engeli / istek sınırı: video tarayıcıda oynasa bile liste alınamaz.
+  // "Video bulunamadı" demek yanıltıcı olur.
+  if (
+    /this content isn'?t available|try again later|rate.?limit|too many requests|\b429\b|page needs to be reloaded/i.test(
+      text
+    )
+  ) {
+    return 'rateLimit'
   }
   if (
     /not available|unavailable|no video|no formats|does not exist|removed|not found|\b404\b|\b410\b|no media/i.test(

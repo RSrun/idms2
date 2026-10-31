@@ -3,8 +3,6 @@ import type { DownloadItem, ExtensionServerStatus } from '@shared/types'
 import { useT } from '../i18n'
 import { formatSpeed } from '../format'
 
-const api = () => window.idms2
-
 interface Props {
   downloads: DownloadItem[]
   serverStatus: ExtensionServerStatus | null

@@ -21,7 +21,9 @@ ve sosyal medya video/ses indirmesi tek uygulamada.
 - **IDM tarzı indirme pencereleri** — indirmeden önce **Dosya İndirme Bilgisi**
   (URL, kategori, kayıt yolu, kategori için yolu hatırla, açıklama, boyut, önizleme),
   indirme sırasında **ilerleme ve bağlantılar** (durum, hız, kalan süre, devam
-  özelliği, segment çubuğu/tablosu, duraklat/iptal, hız sınırı), bitince
+  özelliği, segment çubuğu/tablosu, duraklat/iptal, hız sınırı); listedeki bir
+  indirmeye sol tuşla **çift tıklamak** bu ilerleme/ayrıntı panelini yeniden açar
+  (tamamlanmış indirmede dosyayı açar), bitince
   **İndirme tamamlandı** (Aç / Birlikte aç / Klasörü aç) ve aynı bağlantı
   yeniden eklenince **Aynı indirme bağlantısı** (numaralı kopya / üzerine yaz /
   devam et) seçimi
@@ -236,6 +238,7 @@ scripts/             build-extension, make-icons, test-engine
 | Paketlenmiş `IDMS.exe` “Cannot find module … isexe\index.js” hatası veriyor | `app.asar` içinde `node_modules/isexe` eksik demektir. `package.json`'daki doğrudan `isexe@^2.0.0` bağımlılığı bunu önler: `npm install` sonrası yeniden paketleyin (`npm run dist`) |
 | `npm run dist` “EBUSY / EPERM … app.asar” ile düşüyor | Çıktı klasöründeki `app.asar` başka bir süreç tarafından açık tutuluyor (asar dosyalarını tarayan/görüntüleyen araçlar). O süreci kapatın ya da çıktıyı başka klasöre verin: `npx electron-builder --win --config.directories.output=C:\idms-build` |
 | Torrent ekleyince “ERR_INVALID_ARG_TYPE … arr2hex” | `uint8-util` 2.3.x, webtorrent 2.x ile uyumsuz. `package.json`'daki `overrides.uint8-util = 2.2.6` sabitlemesi kalsın; `npm install` sonrası yeniden paketleyin. Eski kurulumda (Programs\IDMS) hata sürüyorsa `npm run check:deps` ve `npm run verify:build` ile asar'ı denetleyin — yeni kurulumu çalıştırın |
+| Reddit/Instagram “Account authentication is required” hatası | 1.0.4'ten itibaren ham yt-dlp metni yerine çerez yönlendirmesi gösterilir. Eklentinin site erişim izni olduğundan ve Ayarlar → Sosyal medya → **Tarayıcı çerezlerini aktar** açık olduğundan emin olun; tarayıcı açıkken yt-dlp tarayıcı veritabanını okuyamaz, çerezler eklentiden gelir |
 | Torrent eklerken “Cannot add duplicate torrent …” | Aynı torrent ikinci kez ekleniyor. 1.0.3'ten itibaren hata yerine mevcut indirme seçilir (`npm run test:torrent`). Daha eski sürümde listeden mevcut kaydı açın |
 
 Ayrıntılı incelemeler:
@@ -243,6 +246,7 @@ Ayrıntılı incelemeler:
 - [Paketleme / isexe sorunu](docs/paketleme-isexe-sorunu.md)
 - [Torrent / uint8-util uyumsuzluğu](docs/torrent-uint8-util-sorunu.md)
 - [Aynı torrent'in ikinci kez eklenmesi](docs/torrent-cift-ekleme.md)
+- [Medya indirme hata mesajları ve çerez aktarımı](docs/medya-hata-mesajlari.md)
 
 ## Dil notu
 

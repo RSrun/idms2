@@ -34,7 +34,7 @@ export function formatSpeed(bytesPerSec: number, lang: Lang = currentLang): stri
 }
 
 /** Kalan süreyi "2 sa 13 dk" gibi biçimlendir */
-export function formatEta(seconds: number | null, lang: Lang = currentLang): string {
+export function formatEta(seconds: number | null): string {
   if (seconds === null || !isFinite(seconds) || seconds < 0) return '—'
   const s = Math.round(seconds)
   if (s < 60) return `${s}s`

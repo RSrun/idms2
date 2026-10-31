@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events'
-import { existsSync, promises as fsp, statSync, unlinkSync } from 'fs'
+import { existsSync, statSync, unlinkSync } from 'fs'
 import { basename, dirname, extname, join } from 'path'
 import type {
   CategoryId,
@@ -11,7 +11,7 @@ import type {
 import type { Store } from '../store'
 import { SegmentedJob, type SegmentState } from './segment'
 import { filenameFromUrl, probeUrl, sanitizeFilename } from './probe'
-import { formatBytes, t } from '../lang'
+import { t } from '../lang'
 
 const CATEGORY_BY_EXT: Record<string, CategoryId> = {
   '.mp4': 'video', '.mkv': 'video', '.avi': 'video', '.webm': 'video', '.mov': 'video',
@@ -55,6 +55,12 @@ export class DownloadManager extends EventEmitter {
       }
       it.progress.speed = 0
       it.progress.connections = 0
+      // Torrent'lerde eş/hız bilgisi önceki oturumdan kalmasın
+      if (it.torrent) {
+        it.torrent.downloadSpeed = 0
+        it.torrent.uploadSpeed = 0
+        it.torrent.peers = 0
+      }
     }
   }
 
@@ -294,6 +300,21 @@ export class DownloadManager extends EventEmitter {
         item.progress.percent = Math.min(1, doneBytes / item.progress.totalBytes)
       }
     }
+    // Torrent'ler HTTP motorunda değil; hız/eş bilgisi webtorrent'ten gelir.
+    // Duraklatınca son ölçüm değerleri arayüzde kalmasın.
+    if (item.kind === 'torrent') {
+      item.progress.speed = 0
+      item.progress.etaSeconds = null
+      item.progress.connections = 0
+      if (item.torrent) {
+        item.torrent.downloadSpeed = 0
+        item.torrent.uploadSpeed = 0
+        item.torrent.peers = 0
+      }
+      // Tamamlanmış torrent'te durum değişmediği için aşağıdaki emitUpdate
+      // çalışmaz; sıfırlanmış hız/eş bilgisi yine de arayüze gitmeli.
+      if (item.state === 'completed') this.emitUpdate()
+    }
     if (item.state === 'downloading' || item.state === 'queued' || item.state === 'resolving') {
       item.state = 'paused'
       this.persist()
@@ -518,7 +539,12 @@ export class DownloadManager extends EventEmitter {
 
     const candidates = this.items
       .filter(
-        (i) => i.state === 'queued' && i.kind !== 'media' && !this.deferredStart.has(i.id)
+        (i) =>
+          i.state === 'queued' &&
+          // Medya (yt-dlp) ve torrent işleri HTTP motoruna girmez
+          i.kind !== 'media' &&
+          i.kind !== 'torrent' &&
+          !this.deferredStart.has(i.id)
       )
       .sort((a, b) => a.createdAt - b.createdAt)
 

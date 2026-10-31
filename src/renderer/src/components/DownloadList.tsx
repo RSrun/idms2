@@ -12,7 +12,16 @@ import {
 } from '../format'
 import type { I18nKey } from '@shared/i18n'
 
-type Action = 'start' | 'pause' | 'remove' | 'open' | 'copy' | 'showFolder' | 'queue'
+type Action =
+  | 'start'
+  | 'pause'
+  | 'remove'
+  | 'open'
+  | 'copy'
+  | 'showFolder'
+  | 'queue'
+  /** İndirme ayrıntı/ilerleme panelini aç */
+  | 'details'
 
 interface Props {
   items: DownloadItem[]
@@ -107,6 +116,12 @@ export function DownloadList({ items, selectedId, onSelect, onAction }: Props) {
     setDetails(null)
     setMenu({ id, x, y })
   }
+  /** Çift tıklama: IDM tarzı indirme ayrıntı/ilerleme panelini aç */
+  const openPanel = (id: string) => {
+    setDetails(null)
+    setMenu(null)
+    onAction(id, 'details')
+  }
 
   const detailsItem = details ? items.find((i) => i.id === details.id) : undefined
   const menuItem = menu ? items.find((i) => i.id === menu.id) : undefined
@@ -148,6 +163,7 @@ export function DownloadList({ items, selectedId, onSelect, onAction }: Props) {
               onAction={onAction}
               onDetails={openDetails}
               onMenu={openMenu}
+              onPanel={openPanel}
             />
           ))}
         </tbody>
@@ -182,7 +198,8 @@ function Row({
   onSelect,
   onAction,
   onDetails,
-  onMenu
+  onMenu,
+  onPanel
 }: {
   item: DownloadItem
   selected: boolean
@@ -190,13 +207,13 @@ function Row({
   onAction: (id: string, action: Action) => void
   onDetails: (id: string, rect: DOMRect) => void
   onMenu: (id: string, x: number, y: number) => void
+  onPanel: (id: string) => void
 }) {
   const t = useT()
   const lang = getLang()
   const pct = Math.round(item.progress.percent * 100)
   const active = item.state === 'downloading'
   const done = item.state === 'completed'
-  const failed = item.state === 'error'
 
   const canPause = active || item.state === 'queued' || item.state === 'resolving'
   const canStart =
@@ -209,11 +226,14 @@ function Row({
     <tr
       className={selected ? 'selected' : ''}
       onClick={(e) => {
+        // Çift tıklamanın ikinci tıklaması seçimi/ayrıntı kartını bozmasın
+        if (e.detail > 1) return
         onSelect(selected ? null : item.id)
         onDetails(item.id, e.currentTarget.getBoundingClientRect())
       }}
       onDoubleClick={() => {
-        if (done) onAction(item.id, 'open')
+        // IDM tarzı ilerleme paneli: durumdan bağımsız olarak her zaman açılır
+        onPanel(item.id)
       }}
       onContextMenu={(e) => {
         e.preventDefault()

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { MediaFormat, MediaProbeResult } from '@shared/types'
+import type { CookieRecord, MediaFormat, MediaProbeResult } from '@shared/types'
 import { useT } from '../i18n'
 import { formatBytes } from '../format'
 
@@ -9,6 +9,8 @@ interface Props {
   url: string
   pageUrl?: string
   initialTitle?: string
+  /** Eklentinin sayfadan topladığı oturum çerezleri */
+  cookies?: CookieRecord[]
   onClose: () => void
   onDownloaded: (id: string) => void
 }
@@ -19,7 +21,7 @@ type Tab = 'video' | 'audio'
  * Sosyal medya indirme penceresi: yt-dlp biçim listesini gösterir,
  * kullanıcı kalite/seçer ve indirme başlar.
  */
-export function MediaDialog({ url, pageUrl, initialTitle, onClose, onDownloaded }: Props) {
+export function MediaDialog({ url, pageUrl, initialTitle, cookies, onClose, onDownloaded }: Props) {
   const t = useT()
   const [probe, setProbe] = useState<MediaProbeResult | null>(null)
   const [loading, setLoading] = useState(true)
@@ -34,7 +36,7 @@ export function MediaDialog({ url, pageUrl, initialTitle, onClose, onDownloaded 
     ;(async () => {
       setLoading(true)
       try {
-        const res = await api().probeMedia(url, pageUrl)
+        const res = await api().probeMedia(url, pageUrl, cookies)
         if (!alive) return
         setProbe(res)
         if (!res.ok) {
@@ -87,6 +89,7 @@ export function MediaDialog({ url, pageUrl, initialTitle, onClose, onDownloaded 
       const res = await api().downloadMedia({
         url,
         pageUrl,
+        cookies,
         formatId: tab === 'video' ? selectedFormat || undefined : audioFormat || undefined,
         quality: tab === 'audio' ? 'audio' : 'best'
       })

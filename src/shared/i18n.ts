@@ -386,7 +386,7 @@ const en = {
     'Open the post/video page to list qualities (this page is not a single video)',
   'float.needLogin': 'This content needs login cookies (Settings → Social media)',
   'float.rateLimit':
-    'YouTube temporarily refused the request (rate limit / blocked client). Try again in a few seconds.',
+    'The site temporarily refused the request (rate limit / blocked client). Try again in a few seconds.',
   'float.unavailable': 'Video not found or not accessible',
 
   'set.about.version': 'Version',
@@ -822,7 +822,7 @@ const tr: Record<I18nKey, string> = {
     'Gönderi/video sayfasını açınca kaliteler listelenir (bu sayfa tek bir video değil)',
   'float.needLogin': 'Bu içerik için oturum çerezi gerekiyor (Ayarlar → Sosyal medya)',
   'float.rateLimit':
-    'YouTube isteği geçici olarak reddetti (istek sınırı / engellenen istemci). Birkaç saniye sonra yeniden deneyin.',
+    'Site isteği geçici olarak reddetti (istek sınırı / engellenen istemci). Birkaç saniye sonra yeniden deneyin.',
   'float.unavailable': 'Video bulunamadı veya erişime kapalı',
 
   'set.about.version': 'Sürüm',

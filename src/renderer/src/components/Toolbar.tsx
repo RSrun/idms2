@@ -1,8 +1,6 @@
 import type { DownloadItem } from '@shared/types'
 import { useT } from '../i18n'
 
-const api = () => window.idms2
-
 interface Props {
   selected: DownloadItem[]
   unreadCount: number

@@ -70,7 +70,7 @@ export class Notifier extends EventEmitter {
     })
 
     if (withActions) {
-      n.on('action', (event, index) => {
+      n.on('action', (_event, index) => {
         // 0 = Başlat, 1 = İptal
         this.emit('start-action', { id: item.id, action: index === 0 ? 'approve' : 'cancel' })
         this.focusApp()

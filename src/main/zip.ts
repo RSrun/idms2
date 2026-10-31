@@ -7,7 +7,7 @@
  */
 
 import { deflateRawSync } from 'zlib'
-import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from 'fs'
+import { readFileSync, readdirSync, writeFileSync } from 'fs'
 import { join, relative, sep } from 'path'
 
 /** CRC32 tablosu (IEEE 802.3) */
@@ -121,21 +121,4 @@ export function writeZip(srcDir: string, outFile: string): void {
   eocd.writeUInt16LE(0, 20)
 
   writeFileSync(outFile, Buffer.concat([...chunks, centralBuf, eocd]))
-}
-
-/** ZIP dosyasının `PK\x03\x04` imzasıyla başladığını doğrular. */
-export function isZipFile(file: string): boolean {
-  try {
-    if (!statSync(file).isFile()) return false
-    const head = Buffer.alloc(4)
-    const fd = openSync(file, 'r')
-    try {
-      readSync(fd, head, 0, 4, 0)
-    } finally {
-      closeSync(fd)
-    }
-    return head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04
-  } catch {
-    return false
-  }
 }

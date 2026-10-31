@@ -115,24 +115,45 @@ export function ProgressWindow({ item, segments, settings }: Props) {
             <button type="button" className="btn" onClick={() => setDetails((v) => !v)}>
               {details ? t('win.progress.detailsHide') : t('win.progress.detailsShow')}
             </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() =>
-                void window.dlwin.action({
-                  type: pauseable ? 'progress-pause' : 'progress-resume'
-                })
-              }
-            >
-              {pauseable ? t('win.progress.pause') : t('win.progress.resumeBtn')}
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => void window.dlwin.action({ type: 'progress-cancel' })}
-            >
-              {t('win.progress.cancel')}
-            </button>
+            {item.state === 'completed' ? (
+              <>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => void window.dlwin.action({ type: 'progress-open-file' })}
+                >
+                  {t('action.openFile')}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => void window.dlwin.action({ type: 'progress-open-folder' })}
+                >
+                  {t('action.openFolder')}
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() =>
+                    void window.dlwin.action({
+                      type: pauseable ? 'progress-pause' : 'progress-resume'
+                    })
+                  }
+                >
+                  {pauseable ? t('win.progress.pause') : t('win.progress.resumeBtn')}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => void window.dlwin.action({ type: 'progress-cancel' })}
+                >
+                  {t('win.progress.cancel')}
+                </button>
+              </>
+            )}
           </div>
 
           {details && (

@@ -10,7 +10,7 @@ interface Props {
 }
 
 /** Uygulama içi bildirim balonları: önce, sırasında ve sonra. */
-export function ToastStack({ toasts, onDismiss, onOpenSettings, onAction }: Props) {
+export function ToastStack({ toasts, onDismiss, onAction }: Props) {
   const t = useT()
   const [visible, setVisible] = useState<AppToast[]>([])
   const leaving = useRef(new Set<string>())
