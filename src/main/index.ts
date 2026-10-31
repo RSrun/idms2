@@ -15,6 +15,7 @@ import { spawn } from 'child_process'
 import {
   existsSync,
   writeFileSync,
+  appendFileSync,
   promises as fsp,
   mkdirSync,
   copyFileSync,
@@ -114,6 +115,21 @@ function resolveUserDataDir(): void {
   }
   app.setPath('userData', portable)
 }
+
+/** Başlangıçta pencere açılmasını engelleyen hataları kullanıcıya göster. */
+function reportStartupError(error: unknown): void {
+  const detail = error instanceof Error ? error.stack ?? error.message : String(error)
+  try {
+    const log = join(app.getPath('userData'), 'idms2-startup.log')
+    appendFileSync(log, `[${new Date().toISOString()}] ${detail}\n`, 'utf8')
+    dialog.showErrorBox('IDMS başlatılamadı', `Başlangıç hatası kaydedildi:\n${log}\n\n${detail}`)
+  } catch (logError) {
+    dialog.showErrorBox('IDMS başlatılamadı', `${detail}\n\nHata kaydı yazılamadı: ${String(logError)}`)
+  }
+}
+
+process.on('uncaughtException', reportStartupError)
+process.on('unhandledRejection', reportStartupError)
 
 resolveUserDataDir()
 

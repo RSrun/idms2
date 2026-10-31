@@ -59,6 +59,18 @@ npm run ext        # extension/shared → chromium + firefox + gecko hedeflerini
 npm run dist       # derleme + ikon + eklenti + electron-builder ile Windows NSIS kurucusu
 ```
 
+### Windows uygulamasını kod imzalama
+
+Windows kurucusu ve uygulama dosyalarını imzalamak için bir kod imzalama sertifikası (`.pfx`) gerekir. Sertifika dosyasını ve parolasını depoya eklemeyin. PowerShell'de derlemeden önce aşağıdaki ortam değişkenlerini geçerli değerlerle ayarlayın:
+
+```powershell
+$env:CSC_LINK = "C:\sertifikalar\idms.pfx"
+$env:CSC_KEY_PASSWORD = "sertifika-parolasi"
+npm run dist
+```
+
+`CSC_LINK` ile `CSC_KEY_PASSWORD` ayarlandığında electron-builder Windows çıktısını imzalar. Değişkenler ayarlı değilse derleme imzasız olarak devam eder. SmartScreen'in güven uyarısı yalnızca geçerli imza ile hemen kesin olarak ortadan kalkmayabilir; yeni veya az indirilen uygulamalar yine uyarı gösterebilir.
+
 ### Motor testleri (Electron gerekmez)
 
 ```powershell
@@ -220,6 +232,11 @@ scripts/             build-extension, make-icons, test-engine
 | “yt-dlp bulunamadı” | `winget install yt-dlp` veya Ayarlar → Sosyal Medya → yolu elle verin |
 | İndirme hemen hata veriyor | Sunucunun URL'sini kontrol edin; günlüğü `npm run dev` konsolundan izleyin |
 | Port çakışması | Ayarlar → Eklenti → port (0 = otomatik; 9789–9798 taranır) |
+| Paketlenmiş `IDMS.exe` “Cannot find module … isexe\index.js” hatası veriyor | `app.asar` içinde `node_modules/isexe` eksik demektir. `package.json`'daki doğrudan `isexe@^2.0.0` bağımlılığı bunu önler: `npm install` sonrası yeniden paketleyin (`npm run dist`) |
+| `npm run dist` “EBUSY / EPERM … app.asar” ile düşüyor | Çıktı klasöründeki `app.asar` başka bir süreç tarafından açık tutuluyor (asar dosyalarını tarayan/görüntüleyen araçlar). O süreci kapatın ya da çıktıyı başka klasöre verin: `npx electron-builder --win --config.directories.output=C:\idms-build` |
+
+Paketleme/`isexe` sorununun ayrıntılı incelemesi ve doğrulama adımları:
+[docs/paketleme-isexe-sorunu.md](docs/paketleme-isexe-sorunu.md)
 
 ## Dil notu
 
