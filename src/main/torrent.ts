@@ -58,13 +58,16 @@ export class TorrentManager extends EventEmitter {
   /**
    * Torrent ekler; başarı durumunda indirme kimliğini döndürür.
    * savePath verilmezse ayarlardaki klasör kullanılır.
+   *
+   * Aynı torrent zaten etkinse hata vermek yerine mevcut kayıt döner
+   * (`duplicate: true`). webtorrent `Cannot add duplicate torrent …` hatası
+   * fırlatır; kullanıcı aynı magnet'i ikinci kez eklediğinde bu bir hata
+   * değildir.
    */
-  async add(magnetOrPath: string, savePath?: string): Promise<{ id: string }> {
+  async add(magnetOrPath: string, savePath?: string): Promise<{ id: string; duplicate: boolean }> {
     const cfg = this.store.getSettings().torrent
     const dir = savePath || cfg.saveDir
     await fsp.mkdir(dir, { recursive: true })
-
-    const id = `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
 
     let input: string | Buffer = magnetOrPath.trim()
     if (!/^magnet:\?/i.test(input) && existsSync(String(input))) {
@@ -76,21 +79,77 @@ export class TorrentManager extends EventEmitter {
 
     const client = this.ensureClient()
 
-    const torrent = await new Promise<Torrent>((resolve, reject) => {
-      const t = client.add(input as any, { path: dir }, (ready) => {
-        if (ready) resolve(t)
-      })
-      t.on('error', (err: any) => reject(err instanceof Error ? err : new Error(String(err))))
-      // magnet metadata bekleme: hazır olduğunda resolve et; hata da olabilir
-      t.on('metadata', () => resolve(t))
-      // metadata'sız da olsa devam (bazı istemciler ready vermez)
-      setTimeout(() => resolve(t), 30000)
-    })
+    // Zaten etkin bir torrent mi? (çift tıklama, tekrar ekleme, protokol çağrısı)
+    const existing = await this.findTorrent(client, input)
+    if (existing) {
+      const entry = this.entryFor(existing)
+      if (entry) return { id: entry.id, duplicate: true }
+      // İstemcide var ama kaydı yok (ör. yarıda kalmış ekleme): sahiplen
+      return { id: this.track(existing, dir, magnetOrPath), duplicate: false }
+    }
 
-    // İlerleme yayınlarını dinle
-    const entry: ActiveTorrent = { id, torrent, savePath: dir, magnetOrPath: String(magnetOrPath) }
+    let torrent: Torrent
+    try {
+      torrent = await new Promise<Torrent>((resolve, reject) => {
+        let settled = false
+        let timer: ReturnType<typeof setTimeout>
+        let t: Torrent
+        const finish = (err?: Error): void => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          if (err) reject(err)
+          else resolve(t)
+        }
+        t = client.add(input as any, { path: dir }, (ready) => {
+          if (ready) finish()
+        })
+        // magnet metadata bekleme: hazır olduğunda çöz; hata da olabilir
+        t.on('metadata', () => finish())
+        t.on('error', (err: any) => finish(err instanceof Error ? err : new Error(String(err))))
+        // metadata'sız da olsa devam (bazı istemciler ready vermez)
+        timer = setTimeout(() => finish(), 30000)
+      })
+    } catch (err) {
+      // Eşzamanlı iki ekleme yarışı: ikinci istek "duplicate" alır, mevcut kayda dön
+      if (/duplicate torrent/i.test(String((err as Error)?.message))) {
+        const dup = await this.findTorrent(client, input)
+        if (dup) {
+          const entry = this.entryFor(dup)
+          return { id: entry?.id ?? this.track(dup, dir, magnetOrPath), duplicate: Boolean(entry) }
+        }
+      }
+      throw err
+    }
+
+    return { id: this.track(torrent, dir, magnetOrPath), duplicate: false }
+  }
+
+  /** İstemcideki (yok edilmemiş) eşleşen torrenti bulur. */
+  private async findTorrent(client: WebTorrent, input: string | Buffer): Promise<Torrent | null> {
+    try {
+      const found = await client.get(input as any)
+      if (!found || (found as any).destroyed) return null
+      return found as Torrent
+    } catch {
+      return null
+    }
+  }
+
+  private entryFor(torrent: Torrent): ActiveTorrent | undefined {
+    for (const entry of this.active.values()) {
+      if (entry.torrent === torrent) return entry
+    }
+    return undefined
+  }
+
+  /** Torrenti etkin listeye alır, ilerleme olaylarını bağlar. */
+  private track(torrent: Torrent, savePath: string, magnetOrPath: string): string {
+    const id = `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+    const entry: ActiveTorrent = { id, torrent, savePath, magnetOrPath: String(magnetOrPath) }
     this.active.set(id, entry)
 
+    // İlerleme yayınlarını dinle
     torrent.on('download', () => this.emit('progress', id, this.snapshot(entry)))
     torrent.on('upload', () => this.emit('progress', id, this.snapshot(entry)))
     torrent.on('done', () => this.emit('done', id, this.snapshot(entry)))
@@ -99,7 +158,7 @@ export class TorrentManager extends EventEmitter {
 
     // İlk bilgi hemen yayınlansın
     setImmediate(() => this.emit('progress', id, this.snapshot(entry)))
-    return { id }
+    return id
   }
 
   private snapshot(entry: ActiveTorrent): Partial<DownloadItem['torrent']> & { name: string; progress: number } {

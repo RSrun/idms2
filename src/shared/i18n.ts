@@ -272,6 +272,7 @@ const en = {
   'torrent.downloading': 'Downloading',
   'torrent.metadata': 'Fetching metadata…',
   'torrent.invalid': 'Invalid magnet link or torrent file.',
+  'torrent.duplicate': 'This torrent is already in the list; the existing download was selected.',
   'torrent.dhtDisabled': 'DHT is disabled in settings; only tracker peers will be used.',
 
   // --- Ayarlar ---
@@ -384,6 +385,8 @@ const en = {
   'float.pageNotSpecific':
     'Open the post/video page to list qualities (this page is not a single video)',
   'float.needLogin': 'This content needs login cookies (Settings → Social media)',
+  'float.rateLimit':
+    'YouTube temporarily refused the request (rate limit / blocked client). Try again in a few seconds.',
   'float.unavailable': 'Video not found or not accessible',
 
   'set.about.version': 'Version',
@@ -707,6 +710,7 @@ const tr: Record<I18nKey, string> = {
   'torrent.downloading': 'İndiriliyor',
   'torrent.metadata': 'Meta verisi alınıyor…',
   'torrent.invalid': 'Geçersiz magnet bağlantısı veya torrent dosyası.',
+  'torrent.duplicate': 'Bu torrent zaten listede; mevcut indirme seçildi.',
   'torrent.dhtDisabled': 'Ayarlar’dan DHT kapalı; yalnızca izleyici (tracker) eşleri kullanılacak.',
 
   'settings.title': 'Ayarlar',
@@ -817,6 +821,8 @@ const tr: Record<I18nKey, string> = {
   'float.pageNotSpecific':
     'Gönderi/video sayfasını açınca kaliteler listelenir (bu sayfa tek bir video değil)',
   'float.needLogin': 'Bu içerik için oturum çerezi gerekiyor (Ayarlar → Sosyal medya)',
+  'float.rateLimit':
+    'YouTube isteği geçici olarak reddetti (istek sınırı / engellenen istemci). Birkaç saniye sonra yeniden deneyin.',
   'float.unavailable': 'Video bulunamadı veya erişime kapalı',
 
   'set.about.version': 'Sürüm',

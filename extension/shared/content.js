@@ -42,7 +42,7 @@
    * TikTok /video/… ) aranır. `/reels/audio/…` bir ses listesidir.
    */
   const POST_PATH =
-    /\/(?:p|reel|tv)\/[A-Za-z0-9_-]{5,}|\/reels\/(?!(?:audio|highlights|saved|liked)(?:\/|$))[A-Za-z0-9_-]{5,}|\/status\/\d+|\/video\/\d+|\/videos?\/\d+|\/shorts\/[A-Za-z0-9_-]{5,}|\/embed\/[A-Za-z0-9_-]{5,}|\/clip\/[A-Za-z0-9_-]{4,}|\/comments\/[A-Za-z0-9]{4,}|\/watch\/?\?[^#]*\bv=\d+/i
+    /\/(?:p|reel|tv)\/[A-Za-z0-9_-]{5,}|\/reels\/(?!(?:audio|highlights|saved|liked)(?:\/|$))[A-Za-z0-9_-]{5,}|\/status\/\d+|\/video\/\d+|\/videos?\/\d+|\/shorts\/[A-Za-z0-9_-]{5,}|\/embed\/[A-Za-z0-9_-]{5,}|\/clip\/[A-Za-z0-9_-]{4,}|\/comments\/[A-Za-z0-9]{4,}|\/watch(?:\/|\?)[^#]*\bv=[A-Za-z0-9_-]{6,}/i
 
   // -------------------------------------------------------------------------
   // Yardımcılar
@@ -452,6 +452,12 @@
       color: #0a5ed0; font: 600 11px/1 'Segoe UI', system-ui, sans-serif; cursor: pointer;
     }
     .link:hover { background: #e3edfc; text-decoration: underline; }
+    .retry {
+      flex: 0 0 auto; margin-left: auto; border: none; background: transparent;
+      padding: 0 2px; color: #0a5ed0; cursor: pointer;
+      font: 600 11px/1.35 'Segoe UI', system-ui, sans-serif;
+    }
+    .retry:hover { text-decoration: underline; }
 
     .status {
       position: absolute; left: 7px; right: 7px; bottom: 5px; padding: 5px 8px;
@@ -504,6 +510,7 @@
       audioMp3: 'Sadece ses (MP3)',
       best: 'en iyi',
       formats: 'Formatlar…',
+      retry: 'Yenile',
       open: "IDMS'i aç",
       close: 'Kapat',
       added: 'IDMS kuyruğuna eklendi',
@@ -521,6 +528,7 @@
       audioMp3: 'Audio only (MP3)',
       best: 'best',
       formats: 'Formats…',
+      retry: 'Retry',
       open: 'Open IDMS',
       close: 'Close',
       added: 'Queued in IDMS',
@@ -801,7 +809,21 @@
       root.appendChild(noteRow(t('loading'), true))
       return
     }
-    if (formatsState === 'error' || formatsState === 'empty' || formats.length === 0) {
+    if (formatsState === 'error') {
+      const note = noteRow(formatsNote || t('noFormats'), false)
+      const retry = document.createElement('button')
+      retry.type = 'button'
+      retry.className = 'retry'
+      retry.textContent = t('retry')
+      retry.addEventListener('click', (ev) => {
+        ev.stopPropagation()
+        void loadFormats()
+      })
+      note.appendChild(retry)
+      root.appendChild(note)
+      return
+    }
+    if (formatsState === 'empty' || formats.length === 0) {
       root.appendChild(noteRow(formatsNote || t('noFormats'), false))
       return
     }

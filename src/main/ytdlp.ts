@@ -294,44 +294,87 @@ export class YtdlpRunner extends EventEmitter {
       }
     }
 
-    const extra = ['-J', opts.url]
+    const base = ['-J', opts.url]
     if (opts.impersonate) {
       // yt-dlp modern sürümlerde --impersonate izni gerektirir; curl_cffi yoksa yoksay
-      extra.splice(0, 0, '--no-check-certificate')
+      base.splice(0, 0, '--no-check-certificate')
     }
-    const args = await this.baseArgs(extra, cookieFile, undefined, browser)
 
+    // YouTube, tarayıcı oturumunun çerezleriyle oynatıcı istemcisini
+    // engelleyebiliyor ("Video unavailable. This content isn't available,
+    // try again later"); video tarayıcıda oynasa bile liste alınamıyor.
+    // Bu yüzden çerezli deneme başarısız olursa konuk olarak ve farklı bir
+    // oynatıcı istemcisiyle yeniden denenir.
+    const youtube = isYoutubeUrl(opts.url)
+    const hasCookies = !!(cookieFile || browser)
+    const attempts: { withCookies: boolean; extra: string[] }[] = []
+    if (hasCookies) attempts.push({ withCookies: true, extra: [] })
+    if (youtube) {
+      attempts.push({ withCookies: false, extra: [] })
+      attempts.push({
+        withCookies: false,
+        extra: ['--extractor-args', 'youtube:player_client=default,-web']
+      })
+    } else if (!attempts.length) {
+      attempts.push({ withCookies: false, extra: [] })
+    }
+
+    let firstError = ''
+    let lastError = ''
     try {
-      const stdout = await this.runRaw(bin, args, 90000)
-      const info = JSON.parse(stdout)
-      const result = normalizeProbe(info, opts.url)
-
-      // yt-dlp bazı sitelerde (ve doğrudan dosyalarda) boyut bildirmez;
-      // seçim tablosunda "—" kalmasın diye kalanlar HEAD ile tamamlanır.
-      // Boyut sorgusu başarısız olsa bile biçim listesi dönmeli.
-      const urls = new Map<string, string>()
-      for (const f of Array.isArray(info.formats) ? info.formats : []) {
-        if (f?.format_id && typeof f.url === 'string') urls.set(String(f.format_id), f.url)
+      for (let i = 0; i < attempts.length; i++) {
+        const attempt = attempts[i]
+        // Farklı istemci denemesi yalnızca istemci kaynaklı hatalarda anlamlı
+        if (i > 0 && attempt.extra.length && !needsClientFallback(lastError)) break
+        try {
+          const args = await this.baseArgs(
+            [...attempt.extra, ...base],
+            attempt.withCookies ? cookieFile : undefined,
+            undefined,
+            attempt.withCookies ? browser : undefined
+          )
+          const stdout = await this.runRaw(bin, args, 90000)
+          return await this.probeResult(JSON.parse(stdout), opts.url)
+        } catch (e: any) {
+          const message = String(e?.message || e)
+          if (!firstError) firstError = message
+          lastError = message
+          // Kalıcı hatalarda (özel/silinmiş video, desteklenmeyen adres)
+          // yeniden denemek yalnızca gecikme ekler.
+          if (!isRetryableProbeError(message)) break
+        }
       }
-      try {
-        await fillMissingFormatSizes(result.formats, urls, result.pageUrl || opts.url)
-      } catch {
-        /* boyutlar eksik kalsa da liste kullanılabilir */
-      }
-
-      return result
-    } catch (e: any) {
       return {
         ok: false,
         pageUrl: opts.url,
         title: '',
         extractor: '',
         formats: [],
-        error: e?.message || 'yt-dlp hatası'
+        error: firstError || 'yt-dlp hatası'
       }
     } finally {
       if (cookieFile) fsp.unlink(cookieFile).catch(() => undefined)
     }
+  }
+
+  /** yt-dlp JSON çıktısını biçim listesine çevirir (eksik boyutlar HEAD ile tamamlanır). */
+  private async probeResult(info: any, url: string): Promise<MediaProbeResult> {
+    const result = normalizeProbe(info, url)
+
+    // yt-dlp bazı sitelerde (ve doğrudan dosyalarda) boyut bildirmez;
+    // seçim tablosunda "—" kalmasın diye kalanlar HEAD ile tamamlanır.
+    // Boyut sorgusu başarısız olsa bile biçim listesi dönmeli.
+    const urls = new Map<string, string>()
+    for (const f of Array.isArray(info?.formats) ? info.formats : []) {
+      if (f?.format_id && typeof f.url === 'string') urls.set(String(f.format_id), f.url)
+    }
+    try {
+      await fillMissingFormatSizes(result.formats, urls, result.pageUrl || url)
+    } catch {
+      /* boyutlar eksik kalsa da liste kullanılabilir */
+    }
+
+    return result
   }
 
   /** Gerçek indirme; ilerleme satırları olay olarak yayınlanır. */
@@ -552,6 +595,35 @@ export class YtdlpRunner extends EventEmitter {
 }
 
 /* ---------- Biçim normalizasyonu ---------- */
+
+/** YouTube (ve kısaltmaları) adresi mi? */
+function isYoutubeUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./i, '').toLowerCase()
+    return /(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$/.test(host)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Yeniden denemeye değer hata mı? Kalıcı hatalarda (özel/silinmiş video,
+ * desteklenmeyen adres) ikinci bir yt-dlp çağrısı yalnızca gecikme ekler.
+ */
+function isRetryableProbeError(message: string): boolean {
+  const text = String(message || '')
+  if (/unsupported url|is not a valid url|http error 404|\b410\b/i.test(text)) return false
+  return /unavailable|isn'?t available|not available|try again later|rate.?limit|too many requests|\b429\b|sign ?in|log ?in|cookie|authenticat|private|members[- ]only|age.?restrict|forbidden|\b403\b|reload|bot/i.test(
+    text
+  )
+}
+
+/** Oynatıcı istemcisi engellendiğinde farklı istemciyle denemek işe yarar. */
+function needsClientFallback(message: string): boolean {
+  return /unavailable|isn'?t available|try again later|rate.?limit|too many requests|\b429\b|reload|player response/i.test(
+    String(message || '')
+  )
+}
 
 function normalizeProbe(info: any, pageUrl: string): MediaProbeResult {
   const formats: MediaFormat[] = []

@@ -314,7 +314,12 @@ export interface IpcApi {
   downloadMedia(req: MediaDownloadRequest): Promise<{ id: string }>
 
   // --- Torrent ---
-  addTorrent(input: { magnetOrPath: string; saveDir?: string }): Promise<{ id: string }>
+  addTorrent(input: { magnetOrPath: string; saveDir?: string }): Promise<{
+    id: string
+    torrentId?: string
+    /** Torrent zaten ekliydi; yeni kayıt açılmadı */
+    duplicate?: boolean
+  }>
   pickTorrentFile(): Promise<string | null>
 
   // --- Eklenti / sunucu ---

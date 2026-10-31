@@ -1,7 +1,7 @@
 {
   "name": "idms",
   "productName": "IDMS",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "IDM benzeri indirme yöneticisi: torrent, tarayıcı eklentisi, sosyal medya indirme ve bildirimler",
   "main": "out/main/index.js",
   "type": "module",
@@ -17,12 +17,19 @@
     "ext": "node scripts/build-extension.mjs",
     "build:firefox": "npm run ext && Compress-Archive -Path extension/gecko/* -DestinationPath dist/idms-firefox.zip -Force",
     "prepare:ext": "node scripts/build-extension.mjs",
-    "dist": "npm run build && npm run icons && npm run ext && electron-builder --win",
+    "dist": "npm run check:deps && npm run build && npm run icons && npm run ext && electron-builder --win && npm run verify:build",
     "screenshot": "electron-vite dev -- --screenshot",
-    "test:ext": "playwright test"
+    "test:ext": "playwright test",
+    "check:deps": "node scripts/check-torrent-deps.mjs",
+    "test:torrent": "node scripts/test-torrent-dedupe.mjs",
+    "verify:build": "node scripts/check-torrent-deps.mjs --asar"
+  },
+  "overrides": {
+    "uint8-util": "2.2.6"
   },
   "dependencies": {
     "isexe": "^2.0.0",
+    "uint8-util": "2.2.6",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "webtorrent": "^2.5.1",

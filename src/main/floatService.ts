@@ -34,9 +34,16 @@ export function floatMediaKey(media: FloatMediaInfo, key?: string): string {
  * eylemleri ana pencereye yönlendirir.
  */
 export class FloatService {
+  /** Başarısız yoklamalar kısa süre hatırlanır: panel her açılışta yt-dlp'yi
+   *  yeniden çalıştırmasın, ama geçici bir hata (istek sınırı, ağ) videonun
+   *  kalitelerini oturum boyunca gizlemesin. */
+  private static readonly FAILURE_TTL = 5_000
+
   private deps: FloatServiceDeps
   /** Medya anahtarına göre kalite sonuçları (aynı video tekrar açılınca beklemesin) */
   private results = new Map<string, FloatProbeResult>()
+  /** Son başarısız yoklamalar (kısa TTL) */
+  private failures = new Map<string, { res: FloatProbeResult; at: number }>()
   /** Panelde listelenen satırlar; seçilen format kimliği buradan çözülür */
   private rows = new Map<string, FloatFormat[]>()
   /** Aynı medya için eşzamanlı yoklamaları birleştirir */
@@ -63,7 +70,13 @@ export class FloatService {
     }
 
     const cached = this.results.get(k)
-    if (cached) return this.reply(k, cached)
+    if (cached) return this.reply(cached)
+
+    const failed = this.failures.get(k)
+    if (failed) {
+      if (Date.now() - failed.at < FloatService.FAILURE_TTL) return this.reply(failed.res)
+      this.failures.delete(k)
+    }
 
     let pending = this.running.get(k)
     if (!pending) {
@@ -74,7 +87,9 @@ export class FloatService {
       })
     }
     const res = await pending
-    return this.reply(k, res)
+    if (res.ok) this.remember(k, res)
+    else this.rememberFailure(k, res)
+    return this.reply(res)
   }
 
   /** Panelde bir satır seçildiğinde indirmeyi başlatır. */
@@ -117,8 +132,7 @@ export class FloatService {
     }
   }
 
-  private reply(key: string, res: FloatProbeResult): FloatFormatsReply {
-    this.remember(key, res)
+  private reply(res: FloatProbeResult): FloatFormatsReply {
     return {
       ok: res.ok,
       formats: res.formats,
@@ -130,12 +144,22 @@ export class FloatService {
   private remember(key: string, res: FloatProbeResult): void {
     this.results.set(key, res)
     this.rows.set(key, res.formats)
+    this.failures.delete(key)
     // Bellek sınırsız büyümesin: en eski girdiler düşer.
     while (this.results.size > 24) {
       const oldest = this.results.keys().next().value
       if (oldest === undefined) break
       this.results.delete(oldest)
       this.rows.delete(oldest)
+    }
+  }
+
+  private rememberFailure(key: string, res: FloatProbeResult): void {
+    this.failures.set(key, { res, at: Date.now() })
+    while (this.failures.size > 24) {
+      const oldest = this.failures.keys().next().value
+      if (oldest === undefined) break
+      this.failures.delete(oldest)
     }
   }
 }

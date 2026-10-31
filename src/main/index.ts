@@ -116,15 +116,27 @@ function resolveUserDataDir(): void {
   app.setPath('userData', portable)
 }
 
-/** Başlangıçta pencere açılmasını engelleyen hataları kullanıcıya göster. */
+/**
+ * Yakalanmamış hataları kullanıcıya göster.
+ *
+ * Uygulama hazır olduktan sonra oluşan hatalar (ör. bir torrent eklenirken
+ * webtorrent içinde fırlayan hata) başlangıç hatası değildir; pencere açılmış
+ * ve uygulama çalışmaya devam ediyordur. Başlık buna göre ayrılır, aksi hâlde
+ * kullanıcı “IDMS başlatılamadı” diyerek uygulamanın açılmadığını sanır.
+ */
 function reportStartupError(error: unknown): void {
   const detail = error instanceof Error ? error.stack ?? error.message : String(error)
+  const running = app.isReady()
+  const title = running ? 'IDMS: beklenmeyen hata' : 'IDMS başlatılamadı'
+  const intro = running
+    ? 'Hata kaydedildi; uygulama çalışmaya devam ediyor:'
+    : 'Başlangıç hatası kaydedildi:'
   try {
     const log = join(app.getPath('userData'), 'idms2-startup.log')
     appendFileSync(log, `[${new Date().toISOString()}] ${detail}\n`, 'utf8')
-    dialog.showErrorBox('IDMS başlatılamadı', `Başlangıç hatası kaydedildi:\n${log}\n\n${detail}`)
+    dialog.showErrorBox(title, `${intro}\n${log}\n\n${detail}`)
   } catch (logError) {
-    dialog.showErrorBox('IDMS başlatılamadı', `${detail}\n\nHata kaydı yazılamadı: ${String(logError)}`)
+    dialog.showErrorBox(title, `${detail}\n\nHata kaydı yazılamadı: ${String(logError)}`)
   }
 }
 
@@ -840,6 +852,8 @@ function probeErrorNote(raw?: string): string {
       return t('float.needLogin')
     case 'unsupported':
       return t('float.pageNotSpecific')
+    case 'rateLimit':
+      return t('float.rateLimit')
     case 'unavailable':
       return t('float.unavailable')
     default:
@@ -1542,6 +1556,11 @@ function registerIpc(): void {
   ipcMain.handle('torrent:add', async (_e, input: { magnetOrPath: string; saveDir?: string }) => {
     const settings = store.getSettings()
     const res = await torrentMgr.add(input.magnetOrPath, input.saveDir)
+    // Aynı torrent zaten ekliyse yeni kayıt açma; mevcut indirmeyi döndür
+    if (res.duplicate) {
+      const existingId = torrentLinks.get(res.id)
+      if (existingId) return { id: existingId, torrentId: res.id, duplicate: true }
+    }
     // Torrent'i downloads listesine de yaz (tek liste görünümü)
     const item = await manager.add({
       url: input.magnetOrPath,
@@ -1566,7 +1585,7 @@ function registerIpc(): void {
     torrentLinks.set(res.id, item.id)
     manager.externalStarted(item.id)
     notifier.notifyStart({ ...item, state: 'downloading' }, false)
-    return { id: item.id, torrentId: res.id }
+    return { id: item.id, torrentId: res.id, duplicate: false }
   })
 
   // --- Eklenti sunucusu ---
@@ -1778,6 +1797,11 @@ if (gotLock) app.whenReady().then(async () => {
 async function addMagnet(magnet: string): Promise<void> {
   try {
     const res = await torrentMgr.add(magnet)
+    // Zaten indiriliyor: yeni kayıt açmadan pencereyi öne getir
+    if (res.duplicate) {
+      if (win) win.show()
+      return
+    }
     const settings = store.getSettings()
     const item = await manager.add({
       url: magnet,

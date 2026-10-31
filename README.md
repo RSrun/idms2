@@ -230,13 +230,19 @@ scripts/             build-extension, make-icons, test-engine
 | Firefox/Zen'de eklenti görünmüyor | Ayarlar → Eklenti → **Firefox / Zen Browser** → profili seçip **Kur**, sonra tarayıcıyı yeniden başlatın; `about:debugging` ile yüklenen geçici eklenti tarayıcı kapanınca silinir |
 | Bağlantı tıklaması yakalanmıyor | Eklentinin site erişimi iznini ve “Eklenti etkin” anahtarını kontrol edin. Uygulama kapalı ya da eşleştirme geçersizse tıklama **yutulmaz**: sayfada “indirme tarayıcıya bırakıldı” bildirimi çıkar ve dosyayı tarayıcı indirir |
 | “yt-dlp bulunamadı” | `winget install yt-dlp` veya Ayarlar → Sosyal Medya → yolu elle verin |
+| Yüzen panelde “Video bulunamadı veya erişime kapalı” / kalite listesi boş | YouTube, tarayıcı oturumunun çerezleriyle isteği engelleyebilir (“This content isn't available”). IDMS önce çerezlerle, sonra konuk olarak ve `youtube:player_client=default,-web` ile dener. Yine olmazsa panelde **Yenile**'ye basın; gerekirse Ayarlar → Sosyal medya → “Tarayıcı çerezlerini aktar”ı kapatın ve `yt-dlp -U` ile güncelleyin |
 | İndirme hemen hata veriyor | Sunucunun URL'sini kontrol edin; günlüğü `npm run dev` konsolundan izleyin |
 | Port çakışması | Ayarlar → Eklenti → port (0 = otomatik; 9789–9798 taranır) |
 | Paketlenmiş `IDMS.exe` “Cannot find module … isexe\index.js” hatası veriyor | `app.asar` içinde `node_modules/isexe` eksik demektir. `package.json`'daki doğrudan `isexe@^2.0.0` bağımlılığı bunu önler: `npm install` sonrası yeniden paketleyin (`npm run dist`) |
 | `npm run dist` “EBUSY / EPERM … app.asar” ile düşüyor | Çıktı klasöründeki `app.asar` başka bir süreç tarafından açık tutuluyor (asar dosyalarını tarayan/görüntüleyen araçlar). O süreci kapatın ya da çıktıyı başka klasöre verin: `npx electron-builder --win --config.directories.output=C:\idms-build` |
+| Torrent ekleyince “ERR_INVALID_ARG_TYPE … arr2hex” | `uint8-util` 2.3.x, webtorrent 2.x ile uyumsuz. `package.json`'daki `overrides.uint8-util = 2.2.6` sabitlemesi kalsın; `npm install` sonrası yeniden paketleyin. Eski kurulumda (Programs\IDMS) hata sürüyorsa `npm run check:deps` ve `npm run verify:build` ile asar'ı denetleyin — yeni kurulumu çalıştırın |
+| Torrent eklerken “Cannot add duplicate torrent …” | Aynı torrent ikinci kez ekleniyor. 1.0.3'ten itibaren hata yerine mevcut indirme seçilir (`npm run test:torrent`). Daha eski sürümde listeden mevcut kaydı açın |
 
-Paketleme/`isexe` sorununun ayrıntılı incelemesi ve doğrulama adımları:
-[docs/paketleme-isexe-sorunu.md](docs/paketleme-isexe-sorunu.md)
+Ayrıntılı incelemeler:
+
+- [Paketleme / isexe sorunu](docs/paketleme-isexe-sorunu.md)
+- [Torrent / uint8-util uyumsuzluğu](docs/torrent-uint8-util-sorunu.md)
+- [Aynı torrent'in ikinci kez eklenmesi](docs/torrent-cift-ekleme.md)
 
 ## Dil notu
 

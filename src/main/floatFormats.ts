@@ -107,7 +107,7 @@ export function isGenericPage(url: string | null | undefined): boolean {
   return GENERIC_SEGMENTS.has(segments[0])
 }
 
-export type ProbeErrorKind = 'login' | 'unsupported' | 'unavailable'
+export type ProbeErrorKind = 'login' | 'unsupported' | 'unavailable' | 'rateLimit'
 
 /**
  * yt-dlp hata metnini panelde gösterilebilecek kısa bir türe indirger.
@@ -117,8 +117,17 @@ export function classifyProbeError(raw: string | null | undefined): ProbeErrorKi
   const text = String(raw || '').trim()
   if (!text) return null
   if (/unsupported url|is not a valid url/i.test(text)) return 'unsupported'
+  // YouTube'un istek sınırı/istemci engeli: video tarayıcıda oynasa bile
+  // liste alınamaz. "Video bulunamadı" demek yanıltıcı olur.
   if (
-    /log ?in|login required|sign in|cookie|authenticat|private|members[- ]only|age.?restrict|rate.?limit|too many requests|\b429\b|consent/i.test(
+    /this content isn'?t available|try again later|rate.?limit|too many requests|\b429\b|page needs to be reloaded/i.test(
+      text
+    )
+  ) {
+    return 'rateLimit'
+  }
+  if (
+    /log ?in|login required|sign in|cookie|authenticat|private|members[- ]only|age.?restrict|consent/i.test(
       text
     )
   ) {

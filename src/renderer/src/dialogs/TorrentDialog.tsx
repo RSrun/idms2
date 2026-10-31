@@ -14,6 +14,7 @@ export function TorrentDialog({ onClose, onAdded }: Props) {
   const [input, setInput] = useState('')
   const [saveDir, setSaveDir] = useState('')
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -38,9 +39,15 @@ export function TorrentDialog({ onClose, onAdded }: Props) {
     }
     setBusy(true)
     setError('')
+    setNotice('')
     try {
       const res = await api().addTorrent({ magnetOrPath: v, saveDir: saveDir || undefined })
       onAdded(res.id)
+      if (res.duplicate) {
+        // Hata değil: aynı torrent ikinci kez eklendi, mevcut kayıt seçildi
+        setNotice(t('torrent.duplicate'))
+        return
+      }
       onClose()
     } catch (e: any) {
       setError(e?.message || t('torrent.invalid'))
@@ -73,7 +80,10 @@ export function TorrentDialog({ onClose, onAdded }: Props) {
                 className="input"
                 placeholder="magnet:?xt=urn:btih:..."
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => {
+                  setInput(e.target.value)
+                  setNotice('')
+                }}
                 spellCheck={false}
                 style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
               />
@@ -111,6 +121,12 @@ export function TorrentDialog({ onClose, onAdded }: Props) {
               style={{ borderColor: 'var(--danger)', background: 'var(--danger-soft)' }}
             >
               <p style={{ color: 'var(--danger)', margin: 0 }}>{error}</p>
+            </div>
+          )}
+
+          {notice && (
+            <div className="card">
+              <p style={{ margin: 0 }}>{notice}</p>
             </div>
           )}
 
