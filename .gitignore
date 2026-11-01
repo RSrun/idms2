@@ -5,6 +5,9 @@ dist*/
 release/
 *.log
 *.tsbuildinfo
+*.pfx
+*.p12
+*.pvk
 test-results/
 playwright-report/
 tests/.build/

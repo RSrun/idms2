@@ -17,7 +17,11 @@
     "ext": "node scripts/build-extension.mjs",
     "build:firefox": "npm run ext && Compress-Archive -Path extension/gecko/* -DestinationPath dist/idms-firefox.zip -Force",
     "prepare:ext": "node scripts/build-extension.mjs",
-    "dist": "npm run check:deps && npm run build && npm run icons && npm run ext && electron-builder --win && npm run verify:build",
+    "dist": "node scripts/build-signed.mjs",
+    "dist:signed": "node scripts/build-signed.mjs --require-cert",
+    "dist:unsigned": "npm run build:win && npm run verify:build",
+    "build:win": "npm run check:deps && npm run build && npm run icons && npm run ext && electron-builder --win",
+    "cert:new": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make-cert.ps1",
     "screenshot": "electron-vite dev -- --screenshot",
     "test:ext": "playwright test",
     "check:deps": "node scripts/check-torrent-deps.mjs",
@@ -29,9 +33,10 @@
   },
   "dependencies": {
     "isexe": "^2.0.0",
-    "uint8-util": "2.2.6",
+    "parse-torrent": "^11.0.24",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "uint8-util": "2.2.6",
     "webtorrent": "^2.5.1",
     "ws": "^8.18.3"
   },
@@ -60,6 +65,12 @@
     "win": {
       "icon": "resources/icon.png",
       "forceCodeSigning": false,
+      "signtoolOptions": {
+        "signingHashAlgorithms": [
+          "sha256"
+        ],
+        "rfc3161TimeStampServer": "http://timestamp.digicert.com"
+      },
       "target": [
         {
           "target": "nsis",

@@ -10,6 +10,7 @@ import { StatusBar } from './components/StatusBar'
 import { ToastStack } from './components/ToastStack'
 import { NotificationPanel } from './components/NotificationPanel'
 import { ConfirmDownloadDialog } from './dialogs/ConfirmDownloadDialog'
+import { ConfirmTorrentDialog } from './dialogs/ConfirmTorrentDialog'
 import { MediaDialog } from './dialogs/MediaDialog'
 import { TorrentDialog } from './dialogs/TorrentDialog'
 import { SettingsDialog } from './dialogs/SettingsDialog'
@@ -326,6 +327,24 @@ export default function App() {
             void api().cancelDownload(id)
             st.setConfirmItem(null)
           }}
+        />
+      )}
+
+      {/* .torrent dosyası tamamlandığında içeriği için onay penceresi */}
+      {st.torrentConfirmItem && (
+        <ConfirmTorrentDialog
+          item={st.torrentConfirmItem}
+          onDecide={async () => {
+            const item = st.torrentConfirmItem
+            if (!item) return
+            const res = await api().addTorrent({
+              magnetOrPath: item.savePath,
+              saveDir: st.settings?.torrent.saveDir
+            })
+            st.dismissTorrentConfirm()
+            if (res?.id) setSelected(res.id)
+          }}
+          onCancel={() => st.dismissTorrentConfirm()}
         />
       )}
 

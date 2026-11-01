@@ -58,12 +58,31 @@ npm run start      # derlenmiş sürümü çalıştır
 npm run typecheck  # tsc --noEmit (main + renderer)
 npm run icons      # prosedürel PNG ikonlarını üretir (build/resources/icon.png)
 npm run ext        # extension/shared → chromium + firefox + gecko hedeflerini sıfırdan üretir
-npm run dist       # derleme + ikon + eklenti + electron-builder ile Windows NSIS kurucusu
+npm run dist       # derleme + ikon + eklenti + electron-builder ile Windows NSIS kurucusu (imza varsa imzalar)
 ```
 
 ### Windows uygulamasını kod imzalama
 
-Windows kurucusu ve uygulama dosyalarını imzalamak için bir kod imzalama sertifikası (`.pfx`) gerekir. Sertifika dosyasını ve parolasını depoya eklemeyin. PowerShell'de derlemeden önce aşağıdaki ortam değişkenlerini geçerli değerlerle ayarlayın:
+`npm run dist`, `%USERPROFILE%\idms-signing\idms-codesign.pfx` varsa `IDMS.exe` ve
+`IDMS Setup <sürüm>.exe` dosyalarını otomatik imzalar; sertifika yoksa derleme imzasız
+devam eder. İmza SHA-256 ve DigiCert RFC 3161 zaman damgası ile atılır.
+
+İlk kurulum (kendinden imzalı sertifika):
+
+```powershell
+npm run cert:new      # sertifikayı üretir, .pfx + parola dosyası + güvenilen kök depoya ekler
+npm run dist:signed   # sertifika yoksa hata verir; varsa imzalı derler
+npm run dist:unsigned # her zaman imzasız derler
+```
+
+- `.pfx`, parolası ve üretilen `.cer` depo dışında tutulur (`C:\Users\<kullanıcı>\idms-signing`);
+  `.gitignore` `*.pfx`, `*.p12`, `*.pvk` desenlerini yok sayar.
+- `pfx-password.txt` ve `.pfx` birlikte yedeklenmeli: kaybedilirse aynı kimlikle güncelleme
+  imzalanamaz.
+- Kendinden imzalı sertifika yalnızca içe aktarıldığı makinelerde geçerli görünür. Başka
+  bilgisayarlarda “Bilinmeyen yayıncı” ve SmartScreen uyarısı devam eder.
+
+Dağıtım için CA'dan alınmış kod imzalama sertifikası (veya Azure Trusted Signing):
 
 ```powershell
 $env:CSC_LINK = "C:\sertifikalar\idms.pfx"
@@ -71,7 +90,8 @@ $env:CSC_KEY_PASSWORD = "sertifika-parolasi"
 npm run dist
 ```
 
-`CSC_LINK` ile `CSC_KEY_PASSWORD` ayarlandığında electron-builder Windows çıktısını imzalar. Değişkenler ayarlı değilse derleme imzasız olarak devam eder. SmartScreen'in güven uyarısı yalnızca geçerli imza ile hemen kesin olarak ortadan kalkmayabilir; yeni veya az indirilen uygulamalar yine uyarı gösterebilir.
+`CSC_LINK` / `CSC_KEY_PASSWORD` ayarlandığında yerel `.pfx` yerine bunlar kullanılır.
+İmzayı kontrol etmek için: `Get-AuthenticodeSignature dist\win-unpacked\IDMS.exe`.
 
 ### Motor testleri (Electron gerekmez)
 

@@ -55,6 +55,7 @@ const api: IpcApi = {
 
   addTorrent: (input: { magnetOrPath: string; saveDir?: string }) =>
     ipcRenderer.invoke('torrent:add', input),
+  inspectTorrent: (filePath: string) => ipcRenderer.invoke('torrent:inspect', filePath),
   pickTorrentFile: () => ipcRenderer.invoke('dialog:pickTorrent'),
 
   getServerStatus: () => ipcRenderer.invoke('ext:status') as Promise<ExtensionServerStatus>,
@@ -86,6 +87,9 @@ function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
 const extra = {
   /** Onay penceresi required olayı */
   onConfirmRequired: (cb: (item: DownloadItem) => void) => subscribe('confirm-required', cb),
+  /** .torrent dosyası tamamlandıktan sonra içerik onayı */
+  onTorrentFileComplete: (cb: (item: DownloadItem) => void) =>
+    subscribe('torrent-file-complete', cb),
   /** Ayar değişikliği */
   onSettings: (cb: (s: Settings) => void) => subscribe('settings', cb),
   /** Medya indirme iptali */
@@ -126,6 +130,9 @@ const extra = {
   saveToolFile: (fileName: string, base64: string): Promise<string> =>
     ipcRenderer.invoke('tools:saveFile', fileName, base64)
 }
+
+/** Renderer'a açılan birleşik API (env.d.ts tarafından kullanılır). */
+export type ExtendedApi = IpcApi & typeof extra
 
 const dlwin: DownloadWindowApi = {
   state: () => ipcRenderer.invoke('dlwin:state') as Promise<DownloadWindowState>,

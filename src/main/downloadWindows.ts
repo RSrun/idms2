@@ -98,8 +98,7 @@ export class DownloadWindows {
     const existing = this.byKey.get(key)
     if (existing && !existing.isDestroyed()) {
       this.contexts.set(existing.webContents.id, ctx)
-      existing.show()
-      existing.focus()
+      this.reveal(existing)
       this.pushTo(existing, ctx)
       return existing
     }
@@ -134,8 +133,7 @@ export class DownloadWindows {
 
     win.once('ready-to-show', () => {
       if (win.isDestroyed()) return
-      win.show()
-      win.focus()
+      this.reveal(win)
       this.pushTo(win, ctx)
     })
 
@@ -169,6 +167,34 @@ export class DownloadWindows {
       void win.loadFile(this.rendererFile, { query })
     }
     return win
+  }
+
+  /**
+   * İndirme penceresini öne getirir. Windows, arka plandaki bir uygulamanın
+   * pencereyi öne almasını engelleyebildiği için pencere kısa süreliğine
+   * always-on-top yapılır; böylece odak isteği reddedilse bile pencere
+   * görünür kalır. Odak alınamazsa görev çubuğu düğmesi yanıp söner.
+   */
+  private reveal(win: BrowserWindow): void {
+    if (win.isDestroyed()) return
+    if (win.isMinimized()) win.restore()
+    const wasTop = win.isAlwaysOnTop()
+    win.setAlwaysOnTop(true, 'floating')
+    win.show()
+    win.moveTop()
+    win.focus()
+    win.webContents.focus()
+    setTimeout(() => {
+      if (win.isDestroyed()) return
+      win.setAlwaysOnTop(wasTop)
+      if (win.isFocused()) return
+      win.flashFrame(true)
+      const stop = (): void => {
+        if (!win.isDestroyed()) win.flashFrame(false)
+      }
+      win.once('focus', stop)
+      setTimeout(stop, 5000)
+    }, 400)
   }
 
   /* ------------------------------------------------------------------ */

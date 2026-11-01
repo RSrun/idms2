@@ -20,6 +20,8 @@ export function useAppState() {
   const [ready, setReady] = useState(false)
   const pendingConfirm = useRef<DownloadItem | null>(null)
   const [confirmItem, setConfirmItem] = useState<DownloadItem | null>(null)
+  // Aynı anda birden çok .torrent inebilir: onay isteklerini sırayla göster.
+  const [torrentConfirmQueue, setTorrentConfirmQueue] = useState<DownloadItem[]>([])
 
   useEffect(() => {
     let unsubs: Array<() => void> = []
@@ -61,6 +63,11 @@ export function useAppState() {
         api().onConfirmRequired((item) => {
           pendingConfirm.current = item
           setConfirmItem(item)
+        }),
+        api().onTorrentFileComplete((item) => {
+          setTorrentConfirmQueue((prev) =>
+            prev.some((d) => d.id === item.id) ? prev : [...prev, item]
+          )
         })
       )
     })()
@@ -97,6 +104,11 @@ export function useAppState() {
       .catch(() => undefined)
   }, [])
 
+  /** Sıradaki .torrent onay isteğini kapat. */
+  const dismissTorrentConfirm = useCallback(() => {
+    setTorrentConfirmQueue((prev) => prev.slice(1))
+  }, [])
+
   return {
     ready,
     downloads,
@@ -110,6 +122,8 @@ export function useAppState() {
     serverStatus,
     extEvents,
     confirmItem,
-    setConfirmItem
+    setConfirmItem,
+    torrentConfirmItem: torrentConfirmQueue[0] ?? null,
+    dismissTorrentConfirm
   }
 }

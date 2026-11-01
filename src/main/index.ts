@@ -152,6 +152,7 @@ if (!gotLock) {
 }
 
 let win: BrowserWindow | null = null
+const pendingRendererEvents: Array<{ channel: string; payload: unknown }> = []
 let tray: Tray | null = null
 let store: Store
 let manager: DownloadManager
@@ -169,6 +170,37 @@ let clipboardTimer: ReturnType<typeof setInterval> | null = null
 const lastStates = new Map<string, DownloadState>()
 
 const toasts: AppToast[] = []
+
+// ---------------------------------------------------------------------------
+// Windows ile başlat
+// ---------------------------------------------------------------------------
+
+/**
+ * "Windows ile başlat" ayarını işletim sistemine uygular. Windows'ta
+ * HKCU\Software\Microsoft\Windows\CurrentVersion\Run kaydı oluşturulur/silinir.
+ * Geliştirme modunda çalıştırılabilir dosya electron.exe olduğu için uygulama
+ * dizini de argüman olarak eklenir; paketlenmiş sürümde yalnızca IDMS.exe yazılır.
+ */
+function applyStartOnBoot(startOnBoot: boolean): void {
+  if (process.platform !== 'win32' && process.platform !== 'darwin') return
+  try {
+    const args = app.isPackaged ? ['--autostart'] : [app.getAppPath(), '--autostart']
+    app.setLoginItemSettings({
+      openAtLogin: startOnBoot,
+      enabled: startOnBoot,
+      path: process.execPath,
+      args
+    })
+    const applied = app.getLoginItemSettings({ path: process.execPath, args })
+    if (applied.openAtLogin !== startOnBoot) {
+      console.warn('[startOnBoot] kayıt uygulanamadı', applied)
+    } else {
+      console.log('[startOnBoot]', startOnBoot ? 'açık' : 'kapalı')
+    }
+  } catch (e) {
+    console.error('[startOnBoot]', e)
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Pencere
@@ -197,11 +229,13 @@ function createWindow(): void {
   })
 
   win.on('ready-to-show', () => {
+    // "Simge durumunda başlat": pencereyi göstermeden tepsiden devam et
     if (settings.general.startMinimized) {
-      win?.showInactive()
+      win?.hide()
     } else {
       win?.show()
     }
+    flushPendingRendererEvents()
 
     // Test modu: `--screenshot [yol]` ile pencereyi yakalayıp çıkar
     if (process.argv.includes('--screenshot')) {
@@ -256,8 +290,30 @@ function createWindow(): void {
 
 function sendToRenderer(channel: string, payload: unknown): void {
   if (win && !win.isDestroyed()) {
+    if (win.webContents.isLoading()) {
+      pendingRendererEvents.push({ channel, payload })
+      return
+    }
     win.webContents.send(channel, payload)
+    return
   }
+  pendingRendererEvents.push({ channel, payload })
+}
+
+function flushPendingRendererEvents(): void {
+  if (!win || win.isDestroyed() || win.webContents.isLoading()) return
+  for (const event of pendingRendererEvents.splice(0)) {
+    win.webContents.send(event.channel, event.payload)
+  }
+}
+
+function isTorrentFile(item: DownloadItem): boolean {
+  const hasTorrentExtension = (value: string | undefined): boolean => {
+    if (!value) return false
+    const clean = value.split(/[?#]/, 1)[0].replace(/\\/g, '/')
+    return clean.toLowerCase().endsWith('.torrent')
+  }
+  return hasTorrentExtension(item.name) || hasTorrentExtension(item.savePath) || hasTorrentExtension(item.url)
 }
 
 // ---------------------------------------------------------------------------
@@ -312,9 +368,29 @@ function wireManager(): void {
   })
 
   manager.on('completed', (item: DownloadItem) => {
-    notifier.notifyComplete(item)
     sendToRenderer('item', item)
     downloadWindows?.closeProgress(item.id)
+
+    // .torrent dosyası indiğinde içeriği için onay penceresi aç. Bu durumda
+    // "indirme tamamlandı" penceresi/bildirimi gösterilmez: kullanıcı doğrudan
+    // torrent içeriği kararını görsün, iki pencere üst üste binmesin.
+    const askTorrent =
+      item.kind !== 'torrent' &&
+      store.getSettings().general.confirmTorrentAfterDownload === true &&
+      isTorrentFile(item) &&
+      existsSync(item.savePath)
+
+    if (askTorrent) {
+      downloadWindows?.closeComplete(item.id)
+      const fresh = !win || win.isDestroyed()
+      revealMainWindow()
+      // Pencere yeniden açıldıysa arayüz abone olmadan olay kaybolmasın:
+      // sendToRenderer yükleme sırasında kuyruklar, yine de kısa gecikme ekle.
+      setTimeout(() => sendToRenderer('torrent-file-complete', item), fresh ? 1200 : 60)
+      return
+    }
+
+    notifier.notifyComplete(item)
     if (store.getSettings().notifications.completeWindow !== false) {
       downloadWindows?.openComplete(item.id)
     } else {
@@ -376,11 +452,28 @@ function startClipboardMonitor(): void {
       const text = clipboard.readText('clipboard').trim()
       if (!text || text === last) return
       last = text
-      if (!/^https?:\/\/\S+$/i.test(text)) return
+      // Panodan gelen düz yazıları ve kopyalanan kod/metin bloklarındaki URL'leri yoksay.
+      // Yalnızca tek başına geçerli HTTP(S) adresi bildirim üretir.
+      if (/\s/.test(text)) return
+      let parsed: URL
+      try {
+        parsed = new URL(text)
+      } catch {
+        return
+      }
+      if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname.includes('.')) return
+      if (parsed.username || parsed.password) return
+      const normalizedUrl = parsed.href
       // Aynı URL zaten listede mi?
-      const exists = manager.list().some((d) => d.url === text)
+      const exists = manager.list().some((d) => {
+        try {
+          return new URL(d.url).href === normalizedUrl
+        } catch {
+          return d.url === text
+        }
+      })
       if (exists) return
-      notifier.notifyClipboard(text)
+      notifier.notifyClipboard(normalizedUrl)
     } catch {
       /* yoksay */
     }
@@ -910,6 +1003,11 @@ function floatOpenFormats(m: FloatMediaInfo): void {
 function revealMainWindow(): void {
   if (!win || win.isDestroyed()) {
     createWindow()
+    const created = win
+    created?.once('ready-to-show', () => {
+      created.show()
+      created.focus()
+    })
     return
   }
   if (win.isMinimized()) win.restore()
@@ -1224,6 +1322,11 @@ function registerIpc(): void {
     const next = store.patchSettings(patch as Partial<Settings>)
     setLanguage(next.general.language)
     locator?.updateSettings(next)
+
+    // Windows ile başlat: ayar değiştiyse işletim sistemi kaydını güncelle
+    if (patch.general?.startOnBoot !== undefined) {
+      applyStartOnBoot(next.general.startOnBoot)
+    }
 
     // Eklenti sunucusu yaşam döngüsü
     if (patch.extension && extServer) {
@@ -1663,6 +1766,25 @@ function registerIpc(): void {
     return { id: item.id, torrentId: res.id, duplicate: false }
   })
 
+  /** .torrent dosyasını çöz: onay penceresinde gerçek içerik adı/boyutu görünsün. */
+  ipcMain.handle('torrent:inspect', async (_e, filePath: string) => {
+    try {
+      if (!filePath || !existsSync(filePath)) {
+        return { ok: false as const, error: 'torrent file not found' }
+      }
+      const { default: parseTorrent } = await import('parse-torrent')
+      const parsed = await parseTorrent(await fsp.readFile(filePath))
+      return {
+        ok: true as const,
+        name: parsed.name || '',
+        totalBytes: parsed.length || 0,
+        files: (parsed.files || []).map((f) => ({ name: f.name, length: f.length }))
+      }
+    } catch (e: any) {
+      return { ok: false as const, error: e?.message || String(e) }
+    }
+  })
+
   // --- Eklenti sunucusu ---
   ipcMain.handle('ext:status', () => extServer.status)
   ipcMain.handle('ext:regenerateCode', () => {
@@ -1834,6 +1956,7 @@ function createTray(): void {
 if (gotLock) app.whenReady().then(async () => {
   store = new Store()
   setLanguage(store.getSettings().general.language)
+  applyStartOnBoot(store.getSettings().general.startOnBoot)
   registerMagnetProtocol()
 
   manager = new DownloadManager(store)

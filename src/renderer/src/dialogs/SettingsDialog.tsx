@@ -230,6 +230,12 @@ function GeneralTab({ s, patch }: { s: Settings; patch: (p: any) => void }) {
         value={s.general.confirmBeforeDownload}
         onChange={(v) => patch({ general: { confirmBeforeDownload: v } })}
       />
+      <SwitchRow
+        label={t('set.confirmTorrentAfter')}
+        hint={t('set.confirmTorrentAfterHint')}
+        value={s.general.confirmTorrentAfterDownload}
+        onChange={(v) => patch({ general: { confirmTorrentAfterDownload: v } })}
+      />
 
       <div className="setting-row">
         <div className="txt">

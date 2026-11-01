@@ -99,6 +99,8 @@ export interface GeneralSettings {
   autoStart: boolean
   /** Kuyruğa eklenince onay penceresi aç */
   confirmBeforeDownload: boolean
+  /** .torrent dosyası indirildiğinde içeriği için onay penceresi aç */
+  confirmTorrentAfterDownload: boolean
   /** Panodaki bağlantıları yakala */
   monitorClipboard: boolean
   startOnBoot: boolean
@@ -284,6 +286,8 @@ export interface IpcApi {
   downloadMedia(req: MediaDownloadRequest): Promise<{ id: string }>
 
   // --- Torrent ---
+  /** .torrent dosyasının içeriğini (ad, boyut, dosyalar) çözer */
+  inspectTorrent(filePath: string): Promise<TorrentInspectResult>
   addTorrent(input: { magnetOrPath: string; saveDir?: string }): Promise<{
     id: string
     torrentId?: string
@@ -315,6 +319,17 @@ export interface IpcApi {
 
 export type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K]
+}
+
+/** `.torrent` dosyası çözümleme sonucu (içerik onayı penceresi için) */
+export interface TorrentInspectResult {
+  ok: boolean
+  error?: string
+  /** Torrent içeriğinin adı */
+  name?: string
+  /** İçeriğin toplam boyutu (bayt) */
+  totalBytes?: number
+  files?: Array<{ name: string; length: number }>
 }
 
 export interface AddDownloadRequest {

@@ -150,6 +150,19 @@ const en = {
   'confirm.later': 'Decide later',
   'confirm.from': 'From',
 
+  // --- Torrent dosyası tamamlandıktan sonra içerik onayı ---
+  'confirm.torrent.title': 'Download torrent contents',
+  'confirm.torrent.question': 'The .torrent file has finished downloading. Download the files inside it?',
+  'confirm.torrent.download': 'Download contents',
+  'confirm.torrent.later': 'Decide later',
+  'confirm.torrent.fileCount': 'Files',
+  'confirm.torrent.files': '{n} files',
+  'confirm.torrent.moreFiles': '+{n} more files',
+  'confirm.torrent.reading': 'Reading…',
+  'confirm.torrent.unreadable': 'Could not read the torrent contents; you can still add it.',
+  'confirm.torrent.hint': 'When you approve, the torrent contents are added to the download list.',
+  'confirm.torrent.error': 'Could not add the torrent contents.',
+
   // --- IDM tarzı indirme pencereleri ---
   'win.add.title': 'File Download Information',
   'win.add.url': 'Address (URL)',
@@ -299,6 +312,8 @@ const en = {
   'set.autoStart': 'Start downloads automatically',
   'set.confirmBefore': 'Ask for confirmation before downloading',
   'set.confirmBeforeHint': 'Opens the File Download Information window when a download is requested',
+  'set.confirmTorrentAfter': 'Ask before downloading a completed .torrent file\'s contents',
+  'set.confirmTorrentAfterHint': 'Shows an approval window when a .torrent download finishes, to download the files inside it',
   'set.monitorClipboard': 'Watch clipboard for links',
   'set.startOnBoot': 'Start with Windows',
   'set.startMinimized': 'Start minimized to tray',
@@ -588,6 +603,19 @@ const tr: Record<I18nKey, string> = {
   'confirm.later': 'Sonra karar ver',
   'confirm.from': 'Kaynak',
 
+  // --- Torrent dosyası tamamlandıktan sonra içerik onayı ---
+  'confirm.torrent.title': 'Torrent içeriğini indir',
+  'confirm.torrent.question': '.torrent dosyası indirildi. İçindeki dosyalar indirilsin mi?',
+  'confirm.torrent.download': 'İçeriği indir',
+  'confirm.torrent.later': 'Sonra karar ver',
+  'confirm.torrent.fileCount': 'Dosya',
+  'confirm.torrent.files': '{n} dosya',
+  'confirm.torrent.moreFiles': '+{n} dosya daha',
+  'confirm.torrent.reading': 'Okunuyor…',
+  'confirm.torrent.unreadable': 'Torrent içeriği okunamadı; yine de ekleyebilirsiniz.',
+  'confirm.torrent.hint': 'Onayladığınızda torrent içeriği indirme listesine eklenir.',
+  'confirm.torrent.error': 'Torrent içeriği eklenemedi.',
+
   // --- IDM tarzı indirme pencereleri ---
   'win.add.title': 'Dosya İndirme Bilgisi',
   'win.add.url': 'URL',
@@ -736,6 +764,8 @@ const tr: Record<I18nKey, string> = {
   'set.autoStart': 'İndirmeleri otomatik başlat',
   'set.confirmBefore': 'İndirmeden önce onay iste',
   'set.confirmBeforeHint': 'İndirme istendiğinde Dosya İndirme Bilgisi penceresini açar',
+  'set.confirmTorrentAfter': '.torrent dosyası bittikten sonra içerik için onay iste',
+  'set.confirmTorrentAfterHint': '.torrent indirmesi bittiğinde içindeki dosyaları indirme onay penceresi açar',
   'set.monitorClipboard': 'Panodaki bağlantıları izle',
   'set.startOnBoot': 'Windows ile başlat',
   'set.startMinimized': 'Simge durumunda başlat',

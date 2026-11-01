@@ -16,6 +16,7 @@ const DEFAULT_SETTINGS: Settings = {
     speedLimitMbps: 0,
     autoStart: true,
     confirmBeforeDownload: true,
+    confirmTorrentAfterDownload: true,
     monitorClipboard: true,
     startOnBoot: false,
     startMinimized: false,

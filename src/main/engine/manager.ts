@@ -101,7 +101,9 @@ export class DownloadManager extends EventEmitter {
       savePath = join(settings.general.downloadDir, category, name)
       savePath = uniquePath(savePath)
     } else {
-      savePath = uniquePath(savePath)
+      // Torrent içeriğinin klasörünü webtorrent oluşturur; burada "(1)" eklemek
+      // gösterilen yolu gerçek indirme klasöründen koparır.
+      if (req.kind !== 'torrent') savePath = uniquePath(savePath)
       name = basename(savePath)
     }
 
